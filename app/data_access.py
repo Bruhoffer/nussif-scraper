@@ -1,6 +1,6 @@
-"""Helpers to load PTR trades from the local database into DataFrames."""
-
 from __future__ import annotations
+
+from datetime import date, timedelta
 
 import pandas as pd
 from sqlalchemy import text
@@ -13,18 +13,23 @@ def load_trades_df(days: int = 90) -> pd.DataFrame:
 
     This filters on ``filing_date`` so the dashboard reflects recent
     disclosure activity.
+
+    Uses a DB-agnostic comparison on a concrete cutoff date instead of
+    SQLite-specific ``date('now', ...)`` syntax, so it works on both
+    SQLite and Azure SQL.
     """
+
+    cutoff = date.today() - timedelta(days=days)
 
     query = text(
         """
         SELECT *
         FROM trades
-        WHERE filing_date >= date('now', :offset)
+        WHERE filing_date >= :cutoff
         ORDER BY filing_date DESC
         """
     )
 
-    offset = f"-{days} days"
     with engine.connect() as conn:
-        return pd.read_sql(query, conn, params={"offset": offset})
+        return pd.read_sql(query, conn, params={"cutoff": cutoff})
 

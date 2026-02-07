@@ -23,21 +23,18 @@ from db.config import init_db
 from db.upsert import upsert_trades
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Scrape PTR trades and upsert into DB")
-    parser.add_argument(
-        "--days",
-        type=int,
-        default=90,
-        help="How many days back from today to fetch filings",
-    )
-    args = parser.parse_args()
+def run_ingest(days: int = 90) -> None:
+    """Run a single PTR ingest for the last ``days`` days of filings.
+
+    This is the core pipeline used by both the CLI entrypoint and any
+    scheduled jobs (e.g. Azure Functions Timer Trigger).
+    """
 
     # Ensure tables exist
     init_db()
 
     today = dt.date.today()
-    start_date = today - dt.timedelta(days=args.days)
+    start_date = today - dt.timedelta(days=days)
 
     print(f"Fetching PTR trades filed between {start_date} and {today}...")
     df = fetch_ptr_trades_for_range(start_date, today)
@@ -49,6 +46,19 @@ def main() -> None:
     trades = df.to_dict(orient="records")
     inserted = upsert_trades(trades)
     print(f"Upsert complete. Inserted {inserted} new trades (scraped {len(trades)} total).")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Scrape PTR trades and upsert into DB")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=90,
+        help="How many days back from today to fetch filings",
+    )
+    args = parser.parse_args()
+
+    run_ingest(days=args.days)
 
 
 if __name__ == "__main__":
