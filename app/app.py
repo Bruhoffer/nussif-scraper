@@ -128,7 +128,7 @@ df = get_trades_data(90)
 # If there is no data in the DB yet, show a clear message instead of
 # rendering empty charts/tables that can be confusing.
 if df.empty:
-    st.title("Capital Watch | Congress Trading Tracker")
+    st.title("NUSSIF | Congress Trading Tracker")
     st.warning(
         "No PTR trades found in the database yet. "
         "Run the ingest script (python ingest_ptr_trades.py --days 90) "
@@ -139,7 +139,7 @@ if df.empty:
 # --- SIDEBAR NAVIGATION ---
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/congressman.png", width=80)
-    st.title("Capital Watch")
+    st.title("NUSSIF")
     st.markdown("---")
 
     # Global Chamber filter; currently will just show ["Senate"], but is
@@ -170,7 +170,7 @@ else:
 # --- PAGE 1: EXECUTIVE DASHBOARD ---
 if page == "Executive Dashboard":
     st.title("🏛️ Executive Dashboard")
-    st.markdown("Overview of congressional trading activity over the last 90 days.")
+    st.markdown("Overview1 of congressional trading activity over the last 90 days.")
     
     # KPI Row
     col1, col2, col3, col4 = st.columns(4)
@@ -181,6 +181,21 @@ if page == "Executive Dashboard":
     buy_vol = df[df["Type"] == "BUY"]["Mid Point"].sum()
     sell_vol = df[df["Type"] == "SELL"]["Mid Point"].sum()
     unusual_count = df[df["Unusual"] == True].shape[0]
+    total_trades = len(df)
+
+    # Additional summary stats
+    buy_trades = df[df["Type"] == "BUY"]
+    sell_trades = df[df["Type"] == "SELL"]
+    buy_sell_ratio = (
+        len(buy_trades) / len(sell_trades)
+        if len(sell_trades) > 0
+        else float("inf") if len(buy_trades) > 0
+        else 0.0
+    )
+
+    vol_by_senator = df.groupby("Senator")["Mid Point"].sum()
+    most_active_senator = vol_by_senator.idxmax() if not vol_by_senator.empty else "—"
+    most_active_senator_vol = vol_by_senator.max() if not vol_by_senator.empty else 0.0
     
     with col1:
         st.markdown(f'<div class="metric-card"><div class="metric-label">Total Volume (90D)</div><div class="metric-value">${total_vol/1e6:.1f}M</div></div>', unsafe_allow_html=True)
@@ -190,6 +205,43 @@ if page == "Executive Dashboard":
         st.markdown(f'<div class="metric-card"><div class="metric-label">Sell Volume</div><div class="metric-value" style="color:#ef4444">${sell_vol/1e6:.1f}M</div></div>', unsafe_allow_html=True)
     with col4:
         st.markdown(f'<div class="metric-card"><div class="metric-label">Unusual Trades</div><div class="metric-value" style="color:#f59e0b">{unusual_count}</div></div>', unsafe_allow_html=True)
+
+    # Second KPI row focused on behavior and concentration
+    kpi2_col1, kpi2_col2, kpi2_col3, kpi2_col4 = st.columns(4)
+    with kpi2_col1:
+        ratio_text = "∞" if buy_sell_ratio == float("inf") else f"{buy_sell_ratio:.2f}x"
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Buy / Sell Trade Count</div>'
+            f'<div class="metric-value">{ratio_text}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    with kpi2_col2:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Total Trades (90D)</div>'
+            f'<div class="metric-value">{total_trades:,}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    with kpi2_col3:
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Most Active (Vol)</div>'
+            f'<div class="metric-value" style="font-size: 1.2rem; font-weight: 800;">{most_active_senator}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    # Placeholder for future KPI (e.g. most active party or sector)
+    with kpi2_col4:
+        top_sector = (
+            df.groupby("Sector")["Mid Point"].sum().idxmax()
+            if "Sector" in df.columns and not df["Sector"].empty
+            else "—"
+        )
+        st.markdown(
+            f'<div class="metric-card"><div class="metric-label">Most Traded Sector (Vol)</div>'
+            f'<div class="metric-value">{top_sector}</div></div>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown("### Market Intelligence")
     
@@ -214,6 +266,68 @@ if page == "Executive Dashboard":
                           hole=0.4)
         fig_sector.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_sector, use_container_width=True)
+
+    # Top stocks by volume section – allows you to see which tickers
+    # are attracting the most congressional flow, and whether that
+    # flow is net buying or selling.
+    st.markdown("### Top Stocks by Volume")
+
+    metric_mode = st.radio(
+        "Metric",
+        ["Buy Volume", "Sell Volume", "Net Volume (Buy - Sell)"],
+        horizontal=True,
+        key="top_stocks_metric",
+    )
+
+    buy_df = df[df["Type"] == "BUY"]
+    sell_df = df[df["Type"] == "SELL"]
+
+    buy_vol_by_ticker = buy_df.groupby("Ticker")["Mid Point"].sum()
+    sell_vol_by_ticker = sell_df.groupby("Ticker")["Mid Point"].sum()
+
+    vol_df = pd.DataFrame({
+        "Buy Volume": buy_vol_by_ticker,
+        "Sell Volume": sell_vol_by_ticker,
+    }).fillna(0.0)
+
+    vol_df["Net Volume (Buy - Sell)"] = vol_df["Buy Volume"] - vol_df["Sell Volume"]
+
+    sort_col = metric_mode
+
+    top_stocks = (
+        vol_df.sort_values(sort_col, ascending=False)
+        .head(20)
+        .reset_index(names="Ticker")
+    )
+
+    fig_top_stocks = px.bar(
+        top_stocks,
+        x="Ticker",
+        y=sort_col,
+        title=f"Top Stocks by {sort_col} (90D)",
+        template="plotly_dark",
+        color_discrete_sequence=['#3b82f6'],
+    )
+    fig_top_stocks.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        xaxis_title="Ticker",
+        yaxis_title=sort_col,
+    )
+    st.plotly_chart(fig_top_stocks, use_container_width=True)
+
+    st.markdown("#### Stock Volume Leaderboard")
+    st.dataframe(
+        vol_df.sort_values(sort_col, ascending=False),
+        column_config={
+            "Buy Volume": st.column_config.NumberColumn("Buy Volume", format="$%d"),
+            "Sell Volume": st.column_config.NumberColumn("Sell Volume", format="$%d"),
+            "Net Volume (Buy - Sell)": st.column_config.NumberColumn(
+                "Net Volume (Buy - Sell)", format="$%d"
+            ),
+        },
+        use_container_width=True,
+    )
 
 # --- PAGE 2: LIVE INTELLIGENCE FEED ---
 elif page == "Live Intelligence Feed":
@@ -270,6 +384,10 @@ elif page == "Senator Deep-Dives":
     selected_senator = st.selectbox("Select a Legislator to Analyze", options=df["Senator"].unique())
     
     senator_df = df[df["Senator"] == selected_senator]
+
+    # Split into buys and sells for clearer volume attribution
+    senator_buys = senator_df[senator_df["Type"] == "BUY"]
+    senator_sells = senator_df[senator_df["Type"] == "SELL"]
     
     # Profile Header
     p_col1, p_col2 = st.columns([1, 3])
@@ -286,9 +404,21 @@ elif page == "Senator Deep-Dives":
     # Senator Charts
     sc1, sc2 = st.columns(2)
     with sc1:
-        ticker_counts = senator_df.groupby("Ticker")["Mid Point"].sum().sort_values(ascending=True).tail(10)
-        fig_tickers = px.bar(ticker_counts, orientation='h', title="Top Holdings by Volume", 
-                           template="plotly_dark", color_discrete_sequence=['#818cf8'])
+        # Only count BUY trades when attributing "Top Holdings" to avoid
+        # inflating exposure with sells/trim activity.
+        buy_ticker_vol = (
+            senator_buys.groupby("Ticker")["Mid Point"]
+            .sum()
+            .sort_values(ascending=True)
+            .tail(10)
+        )
+        fig_tickers = px.bar(
+            buy_ticker_vol,
+            orientation='h',
+            title="Top Buy Holdings by Volume",
+            template="plotly_dark",
+            color_discrete_sequence=['#10b981'],
+        )
         st.plotly_chart(fig_tickers, use_container_width=True)
         
     with sc2:
