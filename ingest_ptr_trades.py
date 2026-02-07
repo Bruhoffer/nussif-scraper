@@ -18,9 +18,17 @@ from dotenv import load_dotenv
 # SQLAlchemy engine.
 load_dotenv()
 
-from scraper.pipeline import fetch_ptr_trades_for_range
-from db.config import init_db
-from db.upsert import upsert_trades
+try:
+    # Preferred imports when insiderscraper is installed as a package
+    # (e.g. in Azure Functions, where `insiderscraper` is a top-level
+    # package and `scraper` / `db` live under it).
+    from .scraper.pipeline import fetch_ptr_trades_for_range
+    from .db.config import init_db
+    from .db.upsert import upsert_trades
+except ImportError:  # Fallback for running as a script: `python ingest_ptr_trades.py`
+    from scraper.pipeline import fetch_ptr_trades_for_range
+    from db.config import init_db
+    from db.upsert import upsert_trades
 
 
 def run_ingest(days: int = 90) -> None:
