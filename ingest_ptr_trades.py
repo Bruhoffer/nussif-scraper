@@ -11,6 +11,13 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 
+from dotenv import load_dotenv
+
+# Load environment variables from .env so DATABASE_URL (and others)
+# are available before we import db.config, which constructs the
+# SQLAlchemy engine.
+load_dotenv()
+
 from scraper.pipeline import fetch_ptr_trades_for_range
 from db.config import init_db
 from db.upsert import upsert_trades

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 from sqlalchemy import text
 
-from ..db.config import engine
+from db.config import engine
 
 
 def load_trades_df(days: int = 90) -> pd.DataFrame:

@@ -20,32 +20,36 @@ class Trade(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    senator_name = Column(String, index=True)
-    senator_first_name = Column(String)
-    senator_last_name = Column(String)
-    senator_display_name = Column(String)
-    chamber = Column(String)
+    # Use bounded String lengths so that Azure SQL can index / enforce
+    # unique constraints on these columns (SQL Server does not allow
+    # VARCHAR(MAX) in index/unique key definitions).
 
-    report_id = Column(String, index=True)
-    report_type = Column(String)
-    report_format = Column(String)
+    senator_name = Column(String(200), index=True)
+    senator_first_name = Column(String(100))
+    senator_last_name = Column(String(100))
+    senator_display_name = Column(String(200))
+    chamber = Column(String(20))
+
+    report_id = Column(String(100), index=True)
+    report_type = Column(String(50))
+    report_format = Column(String(20))
     filing_date = Column(Date, index=True)
 
     transaction_date = Column(Date, index=True)
-    owner = Column(String)
-    ticker = Column(String, index=True)
-    asset_name = Column(String)
-    asset_type = Column(String)
+    owner = Column(String(50))
+    ticker = Column(String(32), index=True)
+    asset_name = Column(String(300))
+    asset_type = Column(String(100))
 
-    transaction_type = Column(String)
-    transaction_type_raw = Column(String)
+    transaction_type = Column(String(20))
+    transaction_type_raw = Column(String(100))
 
-    amount_range_raw = Column(String)
+    amount_range_raw = Column(String(100))
     amount_min = Column(Float)
     amount_max = Column(Float)
     mid_point = Column(Float)
 
-    comment = Column(String)
+    comment = Column(String(500))
 
     __table_args__ = (
         UniqueConstraint(
