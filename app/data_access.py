@@ -12,7 +12,7 @@ from db.config import engine
 
 def load_trades_df(
     days: int = 90,
-    max_retries: int = 3,
+    max_retries: int = 5,
     backoff_seconds: float = 2.0,
 ) -> pd.DataFrame:
     """Load trades from the DB for the last ``days`` days of filings.

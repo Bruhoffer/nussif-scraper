@@ -11,11 +11,7 @@ from dotenv import load_dotenv
 # importing data_access/db.config, which constructs the SQLAlchemy engine.
 load_dotenv()
 
-from data_access import load_trades_df, warm_up_db
-
-# Best-effort DB warm-up so the first user hit is less likely to see
-# a cold-start timeout when Azure SQL is waking up.
-warm_up_db()
+from data_access import load_trades_df
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -85,7 +81,10 @@ st.markdown("""
 
 # --- DATA LOADER (REAL PTR TRADES FROM DB) ---
 
-@st.cache_data
+@st.cache_data(
+    ttl=60 * 60,  # 60 minutes
+    show_spinner="Loading latest PTR trades from database... contact @justin.cheong@u.nus.edu if this fails",
+)
 def get_trades_data(days: int = 90) -> pd.DataFrame:
     """Load and transform PTR trades from the database for the dashboard.
 
