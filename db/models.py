@@ -51,6 +51,16 @@ class Trade(Base):
 
     comment = Column(String(500))
 
+    # Enriched pricing fields
+    #
+    # price_at_transaction: closing price on or before the transaction_date
+    # current_price: latest known market price for the ticker at ingest time
+    #
+    # These are kept nullable so existing rows remain valid and we can
+    # gradually backfill historical data.
+    price_at_transaction = Column(Float)
+    current_price = Column(Float)
+
     __table_args__ = (
         UniqueConstraint(
             "senator_name",
@@ -61,4 +71,42 @@ class Trade(Base):
             name="uq_trade_identity",
         ),
     )
+
+
+class TickerMetadata(Base):
+    """Metadata for traded tickers (company, sector, industry).
+
+    This is populated via external data sources (e.g. yfinance) and
+    joined to ``trades`` for sector/industry analytics in the dashboard.
+    """
+
+    __tablename__ = "ticker_metadata"
+
+    ticker = Column(String(32), primary_key=True)
+    company_name = Column(String(300))
+    sector = Column(String(100), index=True)
+    industry = Column(String(200), index=True)
+    last_updated = Column(Date)
+
+
+class PriceCache(Base):
+    """Cached daily prices for tickers.
+
+    Used as a local cache in front of yfinance so that both the local
+    ingest script and Azure Functions stay within rate limits and we
+    avoid redundant API calls.
+    """
+
+    __tablename__ = "price_cache"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(32), index=True)
+    date = Column(Date, index=True)
+    price = Column(Float)
+    last_updated = Column(Date)
+
+    __table_args__ = (
+        UniqueConstraint("ticker", "date", name="uq_price_cache_ticker_date"),
+    )
+
 

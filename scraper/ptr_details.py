@@ -113,6 +113,10 @@ def parse_ptr_trades_from_html(html: str, report_meta: Dict[str, Any]) -> List[D
             if ticker_link is not None
             else ticker_td.get_text(strip=True) or None
         )
+        private_tickers = {"", "-", "--"}
+        if ticker is None or ticker in private_tickers:
+            # Skip this row entirely – non-public or unidentifiable asset
+            continue
 
         asset_name = tds[4].get_text(strip=True) or None
         asset_type = tds[5].get_text(strip=True) or None

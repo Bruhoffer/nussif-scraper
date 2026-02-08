@@ -108,6 +108,10 @@ def get_trades_data(days: int = 90) -> pd.DataFrame:
         "chamber": "Chamber",
     })
 
+    # Expose Owner (member / spouse / joint) for downstream views
+    if "owner" in df.columns and "Owner" not in df.columns:
+        df["Owner"] = df["owner"].fillna("")
+
     # Derive unusual flag based on mid-point value
     df["Unusual"] = df["Mid Point"] > 100_000
 
@@ -115,9 +119,23 @@ def get_trades_data(days: int = 90) -> pd.DataFrame:
     if "Party" not in df.columns:
         df["Party"] = "Unknown"
 
-    # Temporary sector placeholder (until a ticker→sector mapping is added)
+    # Sector handling: prefer any joined DB column `sector` (e.g. from
+    # ticker_metadata) and expose it as the UI-facing `Sector` column.
+    # Fallback to "Unknown" if we have no metadata yet so charts still
+    # render.
     if "Sector" not in df.columns:
-        df["Sector"] = "Unknown"
+        if "sector" in df.columns:
+            df["Sector"] = df["sector"].fillna("Unknown")
+        else:
+            df["Sector"] = "Unknown"
+
+    # Expose price columns with UI-friendly names if present. These are
+    # not yet used for full FIFO P&L, but they lay the groundwork for
+    # simple ROI-style analytics and debugging.
+    if "price_at_transaction" in df.columns and "Price At Transaction" not in df.columns:
+        df["Price At Transaction"] = df["price_at_transaction"]
+    if "current_price" in df.columns and "Current Price" not in df.columns:
+        df["Current Price"] = df["current_price"]
 
     # Ensure Ticker column exists for filters; fall back to asset_name if needed
     if "Ticker" not in df.columns and "ticker" in df.columns:
@@ -438,7 +456,33 @@ elif page == "Senator Deep-Dives":
         st.plotly_chart(fig_type, use_container_width=True)
 
     st.markdown("### Individual Transaction History")
-    st.table(senator_df[["Transaction Date", "Ticker", "Type", "Amount Range", "Sector"]].head(10))
+
+    history_cols = [
+        "Filing Date",
+        "Transaction Date",
+        "Ticker",
+        "Type",
+        "Amount Range",
+        "Mid Point",
+        "Owner",
+        "Sector",
+    ]
+
+    history_df = senator_df[history_cols].sort_values(
+        ["Filing Date", "Transaction Date"], ascending=[False, False]
+    )
+
+    st.dataframe(
+        history_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Mid Point": st.column_config.NumberColumn(
+                "Estimated Value",
+                format="$%d",
+            ),
+        },
+    )
 
 # --- FOOTER ---
 st.markdown("---")

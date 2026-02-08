@@ -30,12 +30,16 @@ def load_trades_df(
 
     cutoff = date.today() - timedelta(days=days)
 
+    # Join ticker_metadata so downstream views can use real sector/
+    # industry information instead of placeholder values.
     query = text(
         """
-        SELECT *
-        FROM trades
-        WHERE filing_date >= :cutoff
-        ORDER BY filing_date DESC
+        SELECT t.*, m.company_name, m.sector, m.industry
+        FROM trades AS t
+        LEFT JOIN ticker_metadata AS m
+          ON t.ticker = m.ticker
+        WHERE t.filing_date >= :cutoff
+        ORDER BY t.filing_date DESC
         """
     )
 

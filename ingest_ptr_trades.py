@@ -25,10 +25,12 @@ try:
     from .scraper.pipeline import fetch_ptr_trades_for_range
     from .db.config import init_db
     from .db.upsert import upsert_trades
+    from .db.prices import enrich_prices_for_trades
 except ImportError:  # Fallback for running as a script: `python ingest_ptr_trades.py`
     from scraper.pipeline import fetch_ptr_trades_for_range
     from db.config import init_db
     from db.upsert import upsert_trades
+    from db.prices import enrich_prices_for_trades
 
 
 def run_ingest(days: int = 90) -> None:
@@ -50,6 +52,11 @@ def run_ingest(days: int = 90) -> None:
     if df.empty:
         print("No PTR trades found in this range. Nothing to upsert.")
         return
+
+    # Enrich with historical and latest prices before persisting, so
+    # downstream analytics and the Streamlit app can rely purely on the
+    # DB without calling yfinance.
+    enrich_prices_for_trades(df)
 
     trades = df.to_dict(orient="records")
     inserted = upsert_trades(trades)
