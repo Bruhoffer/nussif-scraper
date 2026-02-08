@@ -11,7 +11,11 @@ from dotenv import load_dotenv
 # importing data_access/db.config, which constructs the SQLAlchemy engine.
 load_dotenv()
 
-from data_access import load_trades_df
+from data_access import load_trades_df, warm_up_db
+
+# Best-effort DB warm-up so the first user hit is less likely to see
+# a cold-start timeout when Azure SQL is waking up.
+warm_up_db()
 
 # --- CONFIGURATION ---
 st.set_page_config(
