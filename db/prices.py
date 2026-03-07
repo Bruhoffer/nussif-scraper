@@ -13,7 +13,7 @@ Phase B responsibilities (from the high-level plan):
 from __future__ import annotations
 
 import datetime as dt
-from typing import Dict, Optional
+from typing import Dict, Optional, Set, Tuple
 
 import yfinance as yf
 from sqlalchemy import and_, select
@@ -51,8 +51,14 @@ def get_price_on_or_before(
         .limit(1)
     )
     cached = session.execute(stmt).scalars().first()
+    # NEW LOGIC: Even if we found a price, is it "too old"? 
+    # If the closest price we have is from 2023 but we are asking for 2024, 
+    # we MUST fetch the gap.
     if cached is not None:
-        return cached.price
+        # If the gap between target_date and our latest cache is more than 4 days
+        # (to account for weekends), we should try to fetch fresh data.
+        if (target_date - cached.date).days < 4:
+            return cached.price
 
     # 2. Cache miss: fetch a small window of history from yfinance.
     start = target_date - dt.timedelta(days=30)
@@ -160,18 +166,70 @@ def get_latest_price(session: Session, ticker: str) -> Optional[float]:
     return last_price
 
 
-def enrich_prices_for_trades(df) -> None:
+def update_all_current_prices() -> None:
+    """Update the ``current_price`` for all existing trades in the database.
+    
+    This function finds all unique tickers currently stored in the ``trades``
+    table, fetches their latest prices using the yfinance-backed cache, and
+    updates the ``current_price`` column for all rows so that the Streamlit
+    dashboard can accurately calculate current profits.
+    """
+    from .models import Trade
+
+    with SessionLocal() as session:
+        # Get all unique tickers in the database that are not null
+        stmt = select(Trade.ticker).where(Trade.ticker.isnot(None)).distinct()
+        tickers = [row[0] for row in session.execute(stmt).fetchall()]
+        
+        # Fetch the latest price for each ticker and map it
+        latest_prices: Dict[str, float] = {}
+        for ticker in tickers:
+            price = get_latest_price(session, ticker)
+            if price is not None:
+                latest_prices[ticker] = price
+                
+        # Update all trades with the new latest prices
+        # We process in batches or just load all trades, but for simplicity
+        # we can just query all trades that have a ticker and update them.
+        all_trades = session.execute(select(Trade).where(Trade.ticker.isnot(None))).scalars().all()
+        for trade in all_trades:
+            if trade.ticker in latest_prices:
+                trade.current_price = latest_prices[trade.ticker]
+                
+        session.commit()
+        print(f"[prices] Updated current_price for {len(tickers)} unique tickers across {len(all_trades)} trades.")
+
+
+def enrich_prices_for_trades(df) -> Tuple[Set[str], Set[tuple]]:
     """Mutate a trades DataFrame in-place with price columns.
 
     Adds ``price_at_transaction`` and ``current_price`` using the
     shared ``PriceCache`` table and yfinance as a backing source.
 
-    This is designed to be called from the dashboard layer (or
-    ingestion scripts) after trades are loaded from the DB.
+    The function is **best-effort**:
+    - If a lookup fails for a specific (ticker, transaction_date)
+      pair, only that pair gets a NULL ``price_at_transaction``.
+    - If a latest-price lookup fails for a ticker, only that ticker's
+      ``current_price`` values are NULL.
+
+    Returns
+    -------
+    failed_tickers: set[str]
+        Tickers for which latest-price lookups failed in this run.
+    failed_pairs: set[tuple]
+        (ticker, transaction_date) pairs for which historical price
+        lookups failed.
+
+    Callers (e.g. ingest jobs) can log or inspect these sets to
+    understand which symbols are missing prices, while the rest of the
+    data remains usable.
     """
 
+    failed_tickers: Set[str] = set()
+    failed_pairs: Set[tuple] = set()
+
     if df.empty or "ticker" not in df.columns or "transaction_date" not in df.columns:
-        return
+        return failed_tickers, failed_pairs
 
     with SessionLocal() as session:
         # Map (ticker, transaction_date) -> price_at_transaction
@@ -189,6 +247,11 @@ def enrich_prices_for_trades(df) -> None:
             price = get_price_on_or_before(session, ticker, tx_date)
             if price is not None:
                 price_at_tx[(ticker, tx_date)] = price
+            else:
+                # Track failed (ticker, date) pairs so callers can
+                # inspect / log them. Other tickers and dates are
+                # unaffected.
+                failed_pairs.add((ticker, tx_date))
 
         df["price_at_transaction"] = [
             price_at_tx.get((t, d)) if (t is not None and d is not None) else None
@@ -202,6 +265,9 @@ def enrich_prices_for_trades(df) -> None:
             price = get_latest_price(session, ticker)
             if price is not None:
                 latest_prices[ticker] = price
+            else:
+                # Record tickers whose latest-price lookup failed.
+                failed_tickers.add(ticker)
 
         df["current_price"] = [
             latest_prices.get(t) if t is not None else None
@@ -211,5 +277,7 @@ def enrich_prices_for_trades(df) -> None:
         # Persist any new/updated cache entries so subsequent runs (and
         # the Streamlit app) can rely on DB-only reads when needed.
         session.commit()
+
+    return failed_tickers, failed_pairs
 
 

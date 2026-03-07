@@ -85,7 +85,7 @@ st.markdown("""
     ttl=60 * 60,  # 60 minutes
     show_spinner="Loading latest PTR trades from database... contact @justin.cheong@u.nus.edu if this fails",
 )
-def get_trades_data(days: int = 90) -> pd.DataFrame:
+def get_trades_data(days: int = 365) -> pd.DataFrame:
     """Load and transform PTR trades from the database for the dashboard.
 
     This reshapes the raw DB columns to match the names expected by the
@@ -137,6 +137,17 @@ def get_trades_data(days: int = 90) -> pd.DataFrame:
     if "current_price" in df.columns and "Current Price" not in df.columns:
         df["Current Price"] = df["current_price"]
 
+    # Calculate ROI/Profit for each trade
+    if "Price At Transaction" in df.columns and "Current Price" in df.columns:
+        def calculate_roi(row):
+            if pd.isna(row["Price At Transaction"]) or pd.isna(row["Current Price"]) or row["Price At Transaction"] == 0:
+                return 0.0
+            ret = (row["Current Price"] - row["Price At Transaction"]) / row["Price At Transaction"]
+            return ret if row["Type"] == "BUY" else -ret
+            
+        df["Estimated ROI (%)"] = df.apply(calculate_roi, axis=1) * 100
+        df["Estimated Profit"] = (df["Estimated ROI (%)"] / 100) * df["Mid Point"]
+
     # Ensure Ticker column exists for filters; fall back to asset_name if needed
     if "Ticker" not in df.columns and "ticker" in df.columns:
         df["Ticker"] = df["ticker"].fillna("--")
@@ -144,7 +155,7 @@ def get_trades_data(days: int = 90) -> pd.DataFrame:
     return df
 
 
-df = get_trades_data(90)
+df = get_trades_data(365)
 
 # If there is no data in the DB yet, show a clear message instead of
 # rendering empty charts/tables that can be confusing.
@@ -152,7 +163,7 @@ if df.empty:
     st.title("NUSSIF | Congress Trading Tracker")
     st.warning(
         "No PTR trades found in the database yet. "
-        "Run the ingest script (python ingest_ptr_trades.py --days 90) "
+        "Run the ingest script (python ingest_ptr_trades.py --days 365) "
         "and reload this app."
     )
     st.stop()
@@ -165,7 +176,7 @@ with st.sidebar:
 
     # Global Chamber filter; currently will just show ["Senate"], but is
     # ready for ["Senate", "House"] once House data is ingested.
-    chambers = sorted(df["Chamber"].dropna().unique().tolist())
+    chambers = sorted(df["Chamber"].dropna().unique().tolist()) if "Chamber" in df.columns else []
     selected_chambers = st.multiselect(
         "Chamber",
         options=chambers,
@@ -179,7 +190,7 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.info("Data refreshed every 24h via Azure Function.")
+    st.info("Data refreshed every 24h via GitHub Actions.")
 
 # Apply Chamber filter globally so all pages respect it
 if selected_chambers:
@@ -191,7 +202,7 @@ else:
 # --- PAGE 1: EXECUTIVE DASHBOARD ---
 if page == "Executive Dashboard":
     st.title("🏛️ Executive Dashboard")
-    st.markdown("Overview1 of congressional trading activity over the last 90 days.")
+    st.markdown("Overview of congressional trading activity over the last 365 days.")
     
     # KPI Row
     col1, col2, col3, col4 = st.columns(4)
@@ -219,27 +230,32 @@ if page == "Executive Dashboard":
     most_active_senator_vol = vol_by_senator.max() if not vol_by_senator.empty else 0.0
     
     with col1:
-        st.markdown(f'<div class="metric-card"><div class="metric-label">Total Volume (90D)</div><div class="metric-value">${total_vol/1e6:.1f}M</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-label">Total Volume (365D)</div><div class="metric-value">${total_vol/1e6:.1f}M</div></div>', unsafe_allow_html=True)
     with col2:
         st.markdown(f'<div class="metric-card"><div class="metric-label">Buy Volume</div><div class="metric-value" style="color:#10b981">${buy_vol/1e6:.1f}M</div></div>', unsafe_allow_html=True)
     with col3:
         st.markdown(f'<div class="metric-card"><div class="metric-label">Sell Volume</div><div class="metric-value" style="color:#ef4444">${sell_vol/1e6:.1f}M</div></div>', unsafe_allow_html=True)
     with col4:
-        st.markdown(f'<div class="metric-card"><div class="metric-label">Unusual Trades</div><div class="metric-value" style="color:#f59e0b">{unusual_count}</div></div>', unsafe_allow_html=True)
+        if "Estimated Profit" in df.columns:
+            total_profit = df["Estimated Profit"].sum()
+            profit_color = "#10b981" if total_profit >= 0 else "#ef4444"
+            st.markdown(f'<div class="metric-card"><div class="metric-label">Est. Profit (365D)</div><div class="metric-value" style="color:{profit_color}">${total_profit/1e6:.1f}M</div></div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="metric-card"><div class="metric-label">Unusual Trades</div><div class="metric-value" style="color:#f59e0b">{unusual_count}</div></div>', unsafe_allow_html=True)
 
     # Second KPI row focused on behavior and concentration
     kpi2_col1, kpi2_col2, kpi2_col3, kpi2_col4 = st.columns(4)
     with kpi2_col1:
         ratio_text = "∞" if buy_sell_ratio == float("inf") else f"{buy_sell_ratio:.2f}x"
         st.markdown(
-            f'<div class="metric-card"><div class="metric-label">Buy / Sell Trade Count</div>'
-            f'<div class="metric-value">{ratio_text}</div></div>',
+            f'<div class="metric-card"><div class="metric-label">Unusual Trades</div>'
+            f'<div class="metric-value">{unusual_count}</div></div>',
             unsafe_allow_html=True,
         )
 
     with kpi2_col2:
         st.markdown(
-            f'<div class="metric-card"><div class="metric-label">Total Trades (90D)</div>'
+            f'<div class="metric-card"><div class="metric-label">Total Trades (365D)</div>'
             f'<div class="metric-value">{total_trades:,}</div></div>',
             unsafe_allow_html=True,
         )
@@ -276,7 +292,7 @@ if page == "Executive Dashboard":
                          template="plotly_dark",
                          color_discrete_sequence=['#3b82f6'])
         fig_time.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_time, use_container_width=True)
+        st.plotly_chart(fig_time, width='stretch')
         
     with c2:
         # Sector Pie
@@ -286,7 +302,7 @@ if page == "Executive Dashboard":
                           template="plotly_dark",
                           hole=0.4)
         fig_sector.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_sector, use_container_width=True)
+        st.plotly_chart(fig_sector, width='stretch')
 
     # Top stocks by volume section – allows you to see which tickers
     # are attracting the most congressional flow, and whether that
@@ -325,7 +341,7 @@ if page == "Executive Dashboard":
         top_stocks,
         x="Ticker",
         y=sort_col,
-        title=f"Top Stocks by {sort_col} (90D)",
+        title=f"Top Stocks by {sort_col} (365D)",
         template="plotly_dark",
         color_discrete_sequence=['#3b82f6'],
     )
@@ -335,7 +351,7 @@ if page == "Executive Dashboard":
         xaxis_title="Ticker",
         yaxis_title=sort_col,
     )
-    st.plotly_chart(fig_top_stocks, use_container_width=True)
+    st.plotly_chart(fig_top_stocks, width='stretch')
 
     st.markdown("#### Stock Volume Leaderboard")
     st.dataframe(
@@ -347,7 +363,7 @@ if page == "Executive Dashboard":
                 "Net Volume (Buy - Sell)", format="$%d"
             ),
         },
-        use_container_width=True,
+        width='stretch',
     )
 
 # --- PAGE 2: LIVE INTELLIGENCE FEED ---
@@ -379,15 +395,27 @@ elif page == "Live Intelligence Feed":
     if unusual_only:
         filtered_df = filtered_df[filtered_df["Unusual"] == True]
         
+    # Select columns to display
+    display_cols = ["Filing Date", "Transaction Date", "Senator", "Ticker", "Type", "Amount Range", "Mid Point", "Unusual"]
+    if "Estimated Profit" in df.columns and "Estimated ROI (%)" in df.columns:
+        display_cols.extend(["Price At Transaction", "Current Price", "Estimated Profit", "Estimated ROI (%)"])
+
+    # Make sure all columns exist
+    display_cols = [c for c in display_cols if c in filtered_df.columns]
+    
     # Styling the dataframe (Phase 5, Step 21)
     st.dataframe(
-        filtered_df.sort_values("Filing Date", ascending=False),
+        filtered_df[display_cols].sort_values("Filing Date", ascending=False),
         column_config={
             "Mid Point": st.column_config.NumberColumn("Estimated Value", format="$%d"),
             "Unusual": st.column_config.CheckboxColumn("🚨"),
             "Ticker": st.column_config.TextColumn("Symbol", help="Stock Ticker"),
+            "Price At Transaction": st.column_config.NumberColumn("Entry Price", format="$%.2f"),
+            "Current Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
+            "Estimated Profit": st.column_config.NumberColumn("Est. Profit", format="$%d"),
+            "Estimated ROI (%)": st.column_config.NumberColumn("ROI", format="%.2f%%"),
         },
-        use_container_width=True,
+        width='stretch',
         hide_index=True
     )
     
@@ -417,8 +445,14 @@ elif page == "Senator Deep-Dives":
     with p_col2:
         st.header(selected_senator)
         st.markdown(f"**Party:** {senator_df['Party'].iloc[0]}")
-        st.markdown(f"**Total Estimated Volume (90D):** ${senator_df['Mid Point'].sum():,.2f}")
-        st.markdown(f"**Most Traded Sector:** {senator_df['Sector'].mode()[0]}")
+        st.markdown(f"**Total Estimated Volume (365D):** ${senator_df['Mid Point'].sum():,.2f}")
+        
+        if "Estimated Profit" in senator_df.columns:
+            sen_profit = senator_df["Estimated Profit"].sum()
+            prof_color = "green" if sen_profit >= 0 else "red"
+            st.markdown(f"**Total Estimated Profit (365D):** <span style='color:{prof_color}'>${sen_profit:,.2f}</span>", unsafe_allow_html=True)
+            
+        st.markdown(f"**Most Traded Sector:** {senator_df['Sector'].mode()[0] if not senator_df['Sector'].empty else 'Unknown'}")
 
     st.markdown("---")
     
@@ -440,7 +474,7 @@ elif page == "Senator Deep-Dives":
             template="plotly_dark",
             color_discrete_sequence=['#10b981'],
         )
-        st.plotly_chart(fig_tickers, use_container_width=True)
+        st.plotly_chart(fig_tickers, width='stretch')
         
     with sc2:
         type_counts = senator_df.groupby("Type").size().reset_index(name="count")
@@ -453,7 +487,7 @@ elif page == "Senator Deep-Dives":
             # Match normalized BUY/SELL labels produced by the scraper.
             color_discrete_map={"BUY": "#10b981", "SELL": "#ef4444"},
         )
-        st.plotly_chart(fig_type, use_container_width=True)
+        st.plotly_chart(fig_type, width='stretch')
 
     st.markdown("### Individual Transaction History")
 
@@ -467,6 +501,9 @@ elif page == "Senator Deep-Dives":
         "Owner",
         "Sector",
     ]
+    
+    if "Estimated Profit" in senator_df.columns and "Estimated ROI (%)" in senator_df.columns:
+        history_cols.extend(["Price At Transaction", "Current Price", "Estimated Profit", "Estimated ROI (%)"])
 
     history_df = senator_df[history_cols].sort_values(
         ["Filing Date", "Transaction Date"], ascending=[False, False]
@@ -474,13 +511,14 @@ elif page == "Senator Deep-Dives":
 
     st.dataframe(
         history_df,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
-            "Mid Point": st.column_config.NumberColumn(
-                "Estimated Value",
-                format="$%d",
-            ),
+            "Mid Point": st.column_config.NumberColumn("Estimated Value", format="$%d"),
+            "Price At Transaction": st.column_config.NumberColumn("Entry Price", format="$%.2f"),
+            "Current Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
+            "Estimated Profit": st.column_config.NumberColumn("Est. Profit", format="$%d"),
+            "Estimated ROI (%)": st.column_config.NumberColumn("ROI", format="%.2f%%"),
         },
     )
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import numpy as np
+import pandas as pd
 
 from dotenv import load_dotenv
 
@@ -30,7 +32,7 @@ except ImportError:  # Fallback for running as a script: `python ingest_ptr_trad
     from scraper.pipeline import fetch_ptr_trades_for_range
     from db.config import init_db
     from db.upsert import upsert_trades
-    from db.prices import enrich_prices_for_trades
+    from db.prices import enrich_prices_for_trades, update_all_current_prices
 
 
 def run_ingest(days: int = 90) -> None:
@@ -55,12 +57,49 @@ def run_ingest(days: int = 90) -> None:
 
     # Enrich with historical and latest prices before persisting, so
     # downstream analytics and the Streamlit app can rely purely on the
-    # DB without calling yfinance.
-    enrich_prices_for_trades(df)
+    # DB without calling yfinance. ``enrich_prices_for_trades`` is
+    # best-effort and only leaves NULL prices for tickers /
+    # (ticker, date) pairs where yfinance failed, keeping other
+    # trades fully usable.
+    failed_tickers, failed_pairs = enrich_prices_for_trades(df)
+
+    if failed_tickers or failed_pairs:
+        print(
+            "[ingest_ptr_trades] Pricing missing for "
+            f"{len(failed_tickers)} tickers and {len(failed_pairs)} "
+            "(ticker, transaction_date) pairs. "
+            "These trades will be stored with NULL price fields."
+        )
+
+    # --- CLEANING STEP BEFORE UPSERT ---------------------------------
+    # Replace NaN with None (SQL NULL)
+    df = df.replace({np.nan: None})
+
+    # Round price columns to 4 decimal places to prevent scale errors
+    price_cols = ["price_at_transaction", "current_price"]
+    for col in price_cols:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: round(x, 4) if x is not None else None)
+
+    # 1. Force convert everything to standard Python types (removes
+    # numpy-specific dtypes that SQLAlchemy/DB drivers may not like).
+    df = df.astype(object)
+
+    # 2. Replace all forms of "Not a Number" with None (SQL NULL)
+    df = df.replace({np.nan: None, float("inf"): None, float("-inf"): None})
+
+    # 3. Ensure no hidden "NaN" strings or objects remain
+    df = df.where(pd.notnull(df), None)
 
     trades = df.to_dict(orient="records")
     inserted = upsert_trades(trades)
     print(f"Upsert complete. Inserted {inserted} new trades (scraped {len(trades)} total).")
+    
+    # --- UPDATE ALL HISTORICAL PRICES ---
+    # Now that we've inserted new trades, update current prices for ALL
+    # existing trades in the database so the dashboard reflects live profits.
+    print("Updating current prices for all historical trades in the database...")
+    update_all_current_prices()
 
 
 def main() -> None:
