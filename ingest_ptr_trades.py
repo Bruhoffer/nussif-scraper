@@ -33,6 +33,7 @@ except ImportError:  # Fallback for running as a script: `python ingest_ptr_trad
     from db.config import init_db
     from db.upsert import upsert_trades
     from db.prices import enrich_prices_for_trades, update_all_current_prices
+    from db.ticker_metadata import enrich_ticker_metadata
 
 
 def run_ingest(days: int = 90) -> None:
@@ -100,6 +101,11 @@ def run_ingest(days: int = 90) -> None:
     # existing trades in the database so the dashboard reflects live profits.
     print("Updating current prices for all historical trades in the database...")
     update_all_current_prices()
+    
+    # --- ENRICH TICKER METADATA (SECTORS / INDUSTRIES) ---
+    print("Enriching ticker metadata (sectors & industries)...")
+    enriched_count = enrich_ticker_metadata(max_tickers=100)
+    print(f"Enriched metadata for {enriched_count} new tickers.")
 
 
 def main() -> None:
