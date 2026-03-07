@@ -104,7 +104,8 @@ def run_ingest(days: int = 90) -> None:
     
     # --- ENRICH TICKER METADATA (SECTORS / INDUSTRIES) ---
     print("Enriching ticker metadata (sectors & industries)...")
-    enriched_count = enrich_ticker_metadata(max_tickers=100)
+    # Set to None to enrich all new tickers found in the database.
+    enriched_count = enrich_ticker_metadata(max_tickers=None)
     print(f"Enriched metadata for {enriched_count} new tickers.")
 
 
