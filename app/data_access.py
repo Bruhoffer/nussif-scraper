@@ -7,6 +7,11 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
+import sys
+import os
+# Add the parent directory (project root) to sys.path so we can import 'db'
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from db.config import engine
 
 
