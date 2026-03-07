@@ -3,7 +3,7 @@ beautifulsoup4
 pandas
 SQLAlchemy
 pyodbc
-streamlit
+streamlit >= 1.13.0
 plotly
 python-dotenv
 yfinance
