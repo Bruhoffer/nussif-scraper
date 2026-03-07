@@ -125,9 +125,10 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
     # render.
     if "Sector" not in df.columns:
         if "sector" in df.columns:
-            df["Sector"] = df["sector"].fillna("Unknown")
+            # Fill NaNs and replace empty strings (which Yahoo Finance often returns for ETFs)
+            df["Sector"] = df["sector"].fillna("Unknown/ETF").replace("", "Unknown/ETF")
         else:
-            df["Sector"] = "Unknown"
+            df["Sector"] = "Unknown/ETF"
 
     # Expose price columns with UI-friendly names if present. These are
     # not yet used for full FIFO P&L, but they lay the groundwork for
@@ -151,6 +152,10 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
     # Ensure Ticker column exists for filters; fall back to asset_name if needed
     if "Ticker" not in df.columns and "ticker" in df.columns:
         df["Ticker"] = df["ticker"].fillna("--")
+        
+    # Filter out trades that have no valid ticker (e.g., "--" or empty)
+    if "Ticker" in df.columns:
+        df = df[~df["Ticker"].isin(["--", "", None])]
 
     return df
 
