@@ -140,6 +140,10 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
 
     # Calculate ROI/Profit for each trade
     if "Price At Transaction" in df.columns and "Current Price" in df.columns:
+        # Force numeric types to handle any SQLite quirks
+        df["Price At Transaction"] = pd.to_numeric(df["Price At Transaction"], errors='coerce')
+        df["Current Price"] = pd.to_numeric(df["Current Price"], errors='coerce')
+        
         def calculate_roi(row):
             if pd.isna(row["Price At Transaction"]) or pd.isna(row["Current Price"]) or row["Price At Transaction"] == 0:
                 return 0.0
@@ -147,6 +151,8 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
             return ret if row["Type"] == "BUY" else -ret
             
         df["Estimated ROI (%)"] = df.apply(calculate_roi, axis=1) * 100
+        # Force Mid Point to numeric as well just in case
+        df["Mid Point"] = pd.to_numeric(df["Mid Point"], errors='coerce').fillna(0)
         df["Estimated Profit"] = (df["Estimated ROI (%)"] / 100) * df["Mid Point"]
 
     # Ensure Ticker column exists for filters; fall back to asset_name if needed
@@ -161,6 +167,11 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
 
 
 df = get_trades_data(365)
+
+# DEBUGGING BLOCK - Remove when everything works
+with st.expander("Debug Database Columns"):
+    st.write("Columns returned from SQL:", df.columns.tolist())
+    st.write("Column Types:", df.dtypes.astype(str).to_dict())
 
 # If there is no data in the DB yet, show a clear message instead of
 # rendering empty charts/tables that can be confusing.
