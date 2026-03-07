@@ -37,6 +37,10 @@ st.markdown("""
         border-radius: 12px;
         border: 1px solid #334155;
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        min-height: 120px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
     }
     
     .metric-value {
@@ -130,30 +134,11 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
         else:
             df["Sector"] = "Unknown/ETF"
 
-    # Expose price columns with UI-friendly names if present. These are
-    # not yet used for full FIFO P&L, but they lay the groundwork for
-    # simple ROI-style analytics and debugging.
+    # Expose price columns with UI-friendly names if present.
     if "price_at_transaction" in df.columns and "Price At Transaction" not in df.columns:
         df["Price At Transaction"] = df["price_at_transaction"]
     if "current_price" in df.columns and "Current Price" not in df.columns:
         df["Current Price"] = df["current_price"]
-
-    # Calculate ROI/Profit for each trade
-    if "Price At Transaction" in df.columns and "Current Price" in df.columns:
-        # Force numeric types to handle any SQLite quirks
-        df["Price At Transaction"] = pd.to_numeric(df["Price At Transaction"], errors='coerce')
-        df["Current Price"] = pd.to_numeric(df["Current Price"], errors='coerce')
-        
-        def calculate_roi(row):
-            if pd.isna(row["Price At Transaction"]) or pd.isna(row["Current Price"]) or row["Price At Transaction"] == 0:
-                return 0.0
-            ret = (row["Current Price"] - row["Price At Transaction"]) / row["Price At Transaction"]
-            return ret if row["Type"] == "BUY" else -ret
-            
-        df["Estimated ROI (%)"] = df.apply(calculate_roi, axis=1) * 100
-        # Force Mid Point to numeric as well just in case
-        df["Mid Point"] = pd.to_numeric(df["Mid Point"], errors='coerce').fillna(0)
-        df["Estimated Profit"] = (df["Estimated ROI (%)"] / 100) * df["Mid Point"]
 
     # Ensure Ticker column exists for filters; fall back to asset_name if needed
     if "Ticker" not in df.columns and "ticker" in df.columns:
@@ -163,15 +148,58 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
     if "Ticker" in df.columns:
         df = df[~df["Ticker"].isin(["--", "", None])]
 
+    # Calculate ROI/Profit for each trade with "First-Sell Closing" Heuristic
+    if "Price At Transaction" in df.columns and "Current Price" in df.columns:
+        # Force numeric types to handle any SQLite quirks
+        df["Price At Transaction"] = pd.to_numeric(df["Price At Transaction"], errors='coerce')
+        df["Current Price"] = pd.to_numeric(df["Current Price"], errors='coerce')
+        
+        # Sort values by transaction date to prepare for chronological matching
+        df = df.sort_values("Transaction Date").reset_index(drop=True)
+        
+        # We will create an array to store the calculated ROI for each row
+        rois = []
+        
+        for idx, row in df.iterrows():
+            if row["Type"] != "BUY" or pd.isna(row["Price At Transaction"]) or row["Price At Transaction"] == 0:
+                rois.append(np.nan)
+                continue
+                
+            # For a BUY, look forward in time for the first SELL by the same Senator for the same Ticker
+            future_sells = df.iloc[idx+1:]
+            matching_sells = future_sells[
+                (future_sells["Senator"] == row["Senator"]) & 
+                (future_sells["Ticker"] == row["Ticker"]) & 
+                (future_sells["Type"] == "SELL")
+            ]
+            
+            if not matching_sells.empty:
+                # Senator closed the position later! Use the sell price to calculate ROI
+                sell_price = matching_sells.iloc[0]["Price At Transaction"]
+                if pd.isna(sell_price) or sell_price == 0:
+                    # Fallback to current price if sell price data is missing
+                    calc_price = row["Current Price"]
+                else:
+                    calc_price = sell_price
+            else:
+                # Position is still open! Use Current Price
+                calc_price = row["Current Price"]
+                
+            if pd.isna(calc_price):
+                rois.append(np.nan)
+            else:
+                rois.append((calc_price - row["Price At Transaction"]) / row["Price At Transaction"])
+                
+        df["Estimated ROI (%)"] = pd.Series(rois) * 100
+        # Force Mid Point to numeric as well just in case
+        df["Mid Point"] = pd.to_numeric(df["Mid Point"], errors='coerce').fillna(0)
+        df["Estimated Profit"] = (df["Estimated ROI (%)"] / 100) * df["Mid Point"]
+
     return df
 
 
 df = get_trades_data(365)
 
-# DEBUGGING BLOCK - Remove when everything works
-with st.expander("Debug Database Columns"):
-    st.write("Columns returned from SQL:", df.columns.tolist())
-    st.write("Column Types:", df.dtypes.astype(str).to_dict())
 
 # If there is no data in the DB yet, show a clear message instead of
 # rendering empty charts/tables that can be confusing.
@@ -252,20 +280,15 @@ if page == "Executive Dashboard":
     with col3:
         st.markdown(f'<div class="metric-card"><div class="metric-label">Sell Volume</div><div class="metric-value" style="color:#ef4444">${sell_vol/1e6:.1f}M</div></div>', unsafe_allow_html=True)
     with col4:
-        if "Estimated Profit" in df.columns:
-            total_profit = df["Estimated Profit"].sum()
-            profit_color = "#10b981" if total_profit >= 0 else "#ef4444"
-            st.markdown(f'<div class="metric-card"><div class="metric-label">Est. Profit (365D)</div><div class="metric-value" style="color:{profit_color}">${total_profit/1e6:.1f}M</div></div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="metric-card"><div class="metric-label">Unusual Trades</div><div class="metric-value" style="color:#f59e0b">{unusual_count}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-label">Unusual Trades</div><div class="metric-value" style="color:#f59e0b">{unusual_count}</div></div>', unsafe_allow_html=True)
 
     # Second KPI row focused on behavior and concentration
     kpi2_col1, kpi2_col2, kpi2_col3, kpi2_col4 = st.columns(4)
     with kpi2_col1:
         ratio_text = "∞" if buy_sell_ratio == float("inf") else f"{buy_sell_ratio:.2f}x"
         st.markdown(
-            f'<div class="metric-card"><div class="metric-label">Unusual Trades</div>'
-            f'<div class="metric-value">{unusual_count}</div></div>',
+            f'<div class="metric-card"><div class="metric-label">Buy / Sell Trade Count</div>'
+            f'<div class="metric-value">{ratio_text}</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -381,6 +404,32 @@ if page == "Executive Dashboard":
         },
         width='stretch',
     )
+    
+    # Leaderboard of Senator Average ROI
+    if "Estimated ROI (%)" in df.columns:
+        st.markdown("### Top Senators by ROI (Copy-Trade Strategy)")
+        st.markdown("Average return if you had copied every single BUY trade this Senator made over the period.")
+        
+        # Only evaluate ROI based on buy transactions
+        senator_roi = df[df["Type"] == "BUY"].groupby("Senator").agg(
+            Avg_ROI=("Estimated ROI (%)", "mean"),
+            Trades=("Ticker", "count")
+        ).reset_index()
+        
+        # Filter for senators with at least 1 buy trade
+        senator_roi = senator_roi[senator_roi["Trades"] > 0]
+        senator_roi = senator_roi.sort_values("Avg_ROI", ascending=False).reset_index(drop=True)
+        
+        st.dataframe(
+            senator_roi,
+            column_config={
+                "Senator": "Legislator",
+                "Avg_ROI": st.column_config.NumberColumn("Average Copy-Trade ROI", format="%.2f%%"),
+                "Trades": st.column_config.NumberColumn("Total Buy Trades")
+            },
+            width='stretch',
+            hide_index=True
+        )
 
 # --- PAGE 2: LIVE INTELLIGENCE FEED ---
 elif page == "Live Intelligence Feed":
@@ -426,7 +475,7 @@ elif page == "Live Intelligence Feed":
             "Mid Point": st.column_config.NumberColumn("Estimated Value", format="$%d"),
             "Unusual": st.column_config.CheckboxColumn("🚨"),
             "Ticker": st.column_config.TextColumn("Symbol", help="Stock Ticker"),
-            "Price At Transaction": st.column_config.NumberColumn("Entry Price", format="$%.2f"),
+            "Price At Transaction": st.column_config.NumberColumn("Entry/Exit Price", format="$%.2f"),
             "Current Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
             "Estimated Profit": st.column_config.NumberColumn("Est. Profit", format="$%d"),
             "Estimated ROI (%)": st.column_config.NumberColumn("ROI", format="%.2f%%"),
@@ -531,7 +580,7 @@ elif page == "Senator Deep-Dives":
         hide_index=True,
         column_config={
             "Mid Point": st.column_config.NumberColumn("Estimated Value", format="$%d"),
-            "Price At Transaction": st.column_config.NumberColumn("Entry Price", format="$%.2f"),
+            "Price At Transaction": st.column_config.NumberColumn("Entry/Exit Price", format="$%.2f"),
             "Current Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
             "Estimated Profit": st.column_config.NumberColumn("Est. Profit", format="$%d"),
             "Estimated ROI (%)": st.column_config.NumberColumn("ROI", format="%.2f%%"),
