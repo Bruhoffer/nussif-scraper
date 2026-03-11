@@ -112,6 +112,10 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
         "chamber": "Chamber",
     })
 
+    # Normalize Type so 'buy'/'sell' from House matches 'BUY'/'SELL' from Senate
+    if "Type" in df.columns:
+        df["Type"] = df["Type"].str.upper()
+
     # Expose Owner (member / spouse / joint) for downstream views
     if "owner" in df.columns and "Owner" not in df.columns:
         df["Owner"] = df["owner"].fillna("")
@@ -325,9 +329,15 @@ if page == "Executive Dashboard":
     
     with c1:
         # Time Series
-        time_df = df.groupby("Transaction Date")["Mid Point"].sum().reset_index()
+        # Filter for the last 365 days of Transaction Dates to keep the x-axis clean
+        cutoff_date = (pd.to_datetime('today') - pd.DateOffset(days=365)).date()
+        # Convert to datetime series to support comparison
+        transaction_dates = pd.to_datetime(df["Transaction Date"]).dt.date
+        recent_df = df[transaction_dates >= cutoff_date]
+        
+        time_df = recent_df.groupby("Transaction Date")["Mid Point"].sum().reset_index()
         fig_time = px.area(time_df, x="Transaction Date", y="Mid Point", 
-                         title="Daily Aggregate Trading Volume",
+                         title="Daily Aggregate Trading Volume (Past Year)",
                          template="plotly_dark",
                          color_discrete_sequence=['#3b82f6'])
         fig_time.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
@@ -408,16 +418,29 @@ if page == "Executive Dashboard":
     # Leaderboard of Senator Average ROI
     if "Estimated ROI (%)" in df.columns:
         st.markdown("### Top Senators by ROI (Copy-Trade Strategy)")
-        st.markdown("Average return if you had copied every single BUY trade this Senator made over the period.")
+        st.markdown("Return if you had copied every single BUY trade this Senator made over the period.")
         
         # Only evaluate ROI based on buy transactions
-        senator_roi = df[df["Type"] == "BUY"].groupby("Senator").agg(
+        buy_df = df[df["Type"] == "BUY"].copy()
+        
+        # Flag if trade is positive
+        buy_df["Is_Positive"] = buy_df["Estimated ROI (%)"] > 0
+        
+        senator_roi = buy_df.groupby("Senator").agg(
             Avg_ROI=("Estimated ROI (%)", "mean"),
-            Trades=("Ticker", "count")
+            Trades=("Ticker", "count"),
+            Positive_Trades=("Is_Positive", "sum")
         ).reset_index()
         
         # Filter for senators with at least 1 buy trade
         senator_roi = senator_roi[senator_roi["Trades"] > 0]
+        
+        # Calculate Hit Rate
+        senator_roi["Hit_Rate"] = (senator_roi["Positive_Trades"] / senator_roi["Trades"]) * 100
+        
+        # Drop the intermediate column to clean up the display
+        senator_roi = senator_roi.drop(columns=["Positive_Trades"])
+        
         senator_roi = senator_roi.sort_values("Avg_ROI", ascending=False).reset_index(drop=True)
         
         st.dataframe(
@@ -425,6 +448,7 @@ if page == "Executive Dashboard":
             column_config={
                 "Senator": "Legislator",
                 "Avg_ROI": st.column_config.NumberColumn("Average Copy-Trade ROI", format="%.2f%%"),
+                "Hit_Rate": st.column_config.NumberColumn("Hit Rate", format="%.2f%%"),
                 "Trades": st.column_config.NumberColumn("Total Buy Trades")
             },
             width='stretch',
