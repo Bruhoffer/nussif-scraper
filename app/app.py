@@ -417,8 +417,8 @@ if page == "Executive Dashboard":
     
     # Leaderboard of Senator Average ROI
     if "Estimated ROI (%)" in df.columns:
-        st.markdown("### Top Senators by ROI (Copy-Trade Strategy)")
-        st.markdown("Return if you had copied every single BUY trade this Senator made over the period.")
+        st.markdown("## Top Politicians by ROI (Copy-Trade Strategy)")
+        st.markdown("Return if you had copied every single BUY trade this politician made over the period.")
         
         # Only evaluate ROI based on buy transactions
         buy_df = df[df["Type"] == "BUY"].copy()
