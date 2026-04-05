@@ -18,25 +18,11 @@ from .parse import parse_amount_range, normalize_transaction_type
 
 
 def fetch_report_html(report_url: str, session=None) -> str:
-    """Fetch the HTML for a single report URL using an authenticated session.
+    """Fetch the HTML for a single report URL using an authenticated session."""
 
-    Adds debug logging so we can see whether we're actually getting the PTR
-    detail page or being bounced back to the generic home/search page.
-    """
-
-    # Allow caller to reuse an existing authenticated session for efficiency
-    # and to better mirror real browser behaviour across multiple requests.
     if session is None:
         session, _ = create_efd_session()
     resp = session.get(report_url, allow_redirects=True)
-
-    # Basic debug about what we actually received
-    print(f"DEBUG: PTR GET status={resp.status_code}, final_url={resp.url}")
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    title = soup.title.string if soup.title else "<no title>"
-    print(f"DEBUG: HTML Title is: {title}")
-
     resp.raise_for_status()
     return resp.text
 
@@ -171,11 +157,6 @@ def parse_ptr_trades_from_html(html: str, report_meta: Dict[str, Any]) -> List[D
 def fetch_ptr_trades(report_meta: Dict[str, Any], session=None) -> List[Dict[str, Any]]:
     report_url = report_meta["report_url"]
     html = fetch_report_html(report_url, session=session)
-    
-    # DEBUG: Check if we actually got the report or just the landing page
-    if "Agreement" in html or "Prohibited" in html:
-        print("DEBUG: Caught by the landing/disclaimer page!")
-        
     return parse_ptr_trades_from_html(html, report_meta)
 
 

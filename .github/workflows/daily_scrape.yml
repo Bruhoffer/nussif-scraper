@@ -9,7 +9,7 @@ on:
 jobs:
   scrape-and-update:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
@@ -17,7 +17,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.12' # or whatever version you prefer
+        python-version: '3.12'
         cache: 'pip'
 
     - name: Install dependencies
@@ -25,19 +25,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Run Scraper and Update Prices
+    - name: Run daily Senate PTR scraper
       run: |
-        # Scrape last 3 days to catch delayed filings, updates existing trades safely 
-        # because of idempotent upsert, and updates all historical prices
-        python ingest_ptr_trades.py --days 3
+        # Scrapes last 3 days to catch delayed filings.
+        # Idempotent upsert means re-running is always safe.
+        python run_daily.py --days 3
 
     - name: Commit and push changes
       run: |
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-        
-        # Add the sqlite database
         git add data/ptr_trades.db
-        
-        # Only commit if there are changes
         git diff --quiet && git diff --staged --quiet || (git commit -m "Automated daily scrape and price update [skip ci]" && git push)

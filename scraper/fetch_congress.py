@@ -16,7 +16,7 @@ from db.upsert import upsert_trades
 from db.prices import enrich_prices_for_trades, update_all_current_prices
 
 # --- CONFIGURATION ---
-API_KEY = os.getenv('rapid-api-key')
+API_KEY = os.getenv('RAPID_API_KEY')
 API_HOST = "politician-trade-tracker1.p.rapidapi.com"
 
 headers = {

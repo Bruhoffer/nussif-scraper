@@ -20,20 +20,11 @@ from dotenv import load_dotenv
 # SQLAlchemy engine.
 load_dotenv()
 
-try:
-    # Preferred imports when insiderscraper is installed as a package
-    # (e.g. in Azure Functions, where `insiderscraper` is a top-level
-    # package and `scraper` / `db` live under it).
-    from .scraper.pipeline import fetch_ptr_trades_for_range
-    from .db.config import init_db
-    from .db.upsert import upsert_trades
-    from .db.prices import enrich_prices_for_trades
-except ImportError:  # Fallback for running as a script: `python ingest_ptr_trades.py`
-    from scraper.pipeline import fetch_ptr_trades_for_range
-    from db.config import init_db
-    from db.upsert import upsert_trades
-    from db.prices import enrich_prices_for_trades, update_all_current_prices
-    from db.ticker_metadata import enrich_ticker_metadata
+from scraper.pipeline import fetch_ptr_trades_for_range
+from db.config import init_db
+from db.upsert import upsert_trades
+from db.prices import enrich_prices_for_trades, update_all_current_prices
+from db.ticker_metadata import enrich_ticker_metadata
 
 
 def run_ingest(days: int = 90) -> None:
@@ -73,23 +64,14 @@ def run_ingest(days: int = 90) -> None:
         )
 
     # --- CLEANING STEP BEFORE UPSERT ---------------------------------
-    # Replace NaN with None (SQL NULL)
-    df = df.replace({np.nan: None})
-
-    # Round price columns to 4 decimal places to prevent scale errors
+    # Round price columns to 4 decimal places to prevent scale errors,
+    # then replace all NaN / inf variants with None (SQL NULL).
     price_cols = ["price_at_transaction", "current_price"]
     for col in price_cols:
         if col in df.columns:
-            df[col] = df[col].apply(lambda x: round(x, 4) if x is not None else None)
+            df[col] = pd.to_numeric(df[col], errors="coerce").round(4)
 
-    # 1. Force convert everything to standard Python types (removes
-    # numpy-specific dtypes that SQLAlchemy/DB drivers may not like).
-    df = df.astype(object)
-
-    # 2. Replace all forms of "Not a Number" with None (SQL NULL)
-    df = df.replace({np.nan: None, float("inf"): None, float("-inf"): None})
-
-    # 3. Ensure no hidden "NaN" strings or objects remain
+    df = df.astype(object).replace({np.nan: None, float("inf"): None, float("-inf"): None})
     df = df.where(pd.notnull(df), None)
 
     trades = df.to_dict(orient="records")

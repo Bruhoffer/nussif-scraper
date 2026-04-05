@@ -1,10 +1,10 @@
 requests
 beautifulsoup4
 pandas
+numpy
 SQLAlchemy
 pyodbc
 streamlit>=1.30.0
-altair<5.0.0
 plotly
 python-dotenv
 yfinance
