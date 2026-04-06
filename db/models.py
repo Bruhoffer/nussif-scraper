@@ -89,6 +89,30 @@ class TickerMetadata(Base):
     last_updated = Column(Date)
 
 
+class PortfolioSnapshot(Base):
+    """Precomputed monthly portfolio value curve for each senator.
+
+    Populated by ingest/portfolio_snapshots.py during the weekly run.
+    The app reads from this table instead of computing curves at runtime.
+    """
+
+    __tablename__ = "portfolio_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    senator_display_name = Column(String(200), index=True)
+    snapshot_date = Column(Date, index=True)
+    portfolio_value = Column(Float)
+    last_computed = Column(Date)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "senator_display_name",
+            "snapshot_date",
+            name="uq_portfolio_snapshot",
+        ),
+    )
+
+
 class PriceCache(Base):
     """Cached daily prices for tickers.
 

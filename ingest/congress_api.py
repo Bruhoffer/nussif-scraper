@@ -82,6 +82,40 @@ def _parse_amount(amount_str: str | None) -> tuple[float | None, float | None, f
         return None, None, None
 
 
+def _clean_ticker(raw: str | None) -> str | None:
+    """Normalise a raw ticker from the RapidAPI into a valid exchange symbol.
+
+    The API occasionally concatenates company-type descriptors onto the
+    front of tickers (e.g. 'INCKVUE' for Kenvue Inc, 'ETFIBIT' for the
+    IBIT ETF). This function strips those known prefixes and fixes other
+    common formatting issues.
+    """
+    if not isinstance(raw, str) or raw in ("N/A", "", "None"):
+        return None
+
+    # Strip exchange suffix: 'FCN:US' -> 'FCN'
+    ticker = raw.split(":")[0].strip()
+
+    # Known garbled prefixes to strip (longest first to avoid partial matches)
+    _PREFIXES = (
+        "CORPORATION",
+        "CORP",
+        "INC",
+        "ETF",
+        "PLC",
+        "LTD",
+    )
+    for prefix in _PREFIXES:
+        if ticker.startswith(prefix) and len(ticker) > len(prefix):
+            ticker = ticker[len(prefix):]
+            break  # only strip one prefix
+
+    # Fix dot-notation to hyphen for preferred share classes (BRK.B -> BRK-B)
+    ticker = ticker.replace(".", "-")
+
+    return ticker if ticker else None
+
+
 def _transform_for_db(df: pd.DataFrame) -> pd.DataFrame:
     """Transform a RapidAPI trades DataFrame into the shared Trade schema."""
     if df.empty:
@@ -100,10 +134,10 @@ def _transform_for_db(df: pd.DataFrame) -> pd.DataFrame:
     out["chamber"] = df["chamber"]
     out["asset_name"] = df["company"]
 
-    # Strip exchange suffix from tickers (e.g. 'FCN:US' -> 'FCN'), drop 'N/A'
-    out["ticker"] = df["ticker"].apply(
-        lambda x: x.split(":")[0] if isinstance(x, str) and x != "N/A" else None
-    )
+    # Strip exchange suffix (e.g. 'FCN:US' -> 'FCN'), drop 'N/A',
+    # then clean garbled prefixes the API concatenates from company type
+    # descriptors (e.g. 'INCKVUE' -> 'KVUE', 'ETFIBIT' -> 'IBIT').
+    out["ticker"] = df["ticker"].apply(_clean_ticker)
 
     out["transaction_date"] = pd.to_datetime(df["trade_date"], errors="coerce").dt.date
 

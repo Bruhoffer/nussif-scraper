@@ -11,7 +11,12 @@ from dotenv import load_dotenv
 # importing data_access/db.config, which constructs the SQLAlchemy engine.
 load_dotenv()
 
-from data_access import load_trades_df
+from data_access import load_trades_df, load_volume_by_year_df, load_all_trades_df, load_portfolio_curve
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from analysis_helpers import track_positions, compute_portfolio_curve, compute_portfolio_metrics
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -202,7 +207,84 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=60 * 60)
+def get_volume_by_year_data() -> pd.DataFrame:
+    """Load and prepare all-time trade data for the volume by year chart."""
+    df = load_volume_by_year_df()
+    if df.empty:
+        return df
+
+    df["Transaction Date"] = pd.to_datetime(df["transaction_date"])
+    df["Year"] = df["Transaction Date"].dt.year
+    df["Type"] = df["transaction_type"].str.upper()
+    df["Mid Point"] = pd.to_numeric(df["mid_point"], errors="coerce")
+    df["Senator"] = df["senator_display_name"]
+    df["Chamber"] = df["chamber"]
+    return df
+
+
+@st.cache_data(ttl=60 * 60)
+def get_all_trades_data() -> pd.DataFrame:
+    """Load all historical trades (no date filter) for cross-year analysis."""
+    df = load_all_trades_df()
+    if df.empty:
+        return df
+
+    df = df.rename(columns={
+        "transaction_date": "Transaction Date",
+        "filing_date": "Filing Date",
+        "senator_display_name": "Senator",
+        "transaction_type": "Type",
+        "amount_range_raw": "Amount Range",
+        "mid_point": "Mid Point",
+        "chamber": "Chamber",
+    })
+    if "Type" in df.columns:
+        df["Type"] = df["Type"].str.upper()
+    if "owner" in df.columns and "Owner" not in df.columns:
+        df["Owner"] = df["owner"].fillna("")
+    if "sector" in df.columns and "Sector" not in df.columns:
+        df["Sector"] = df["sector"].fillna("Unknown/ETF").replace("", "Unknown/ETF")
+    if "ticker" in df.columns and "Ticker" not in df.columns:
+        df["Ticker"] = df["ticker"].fillna("--")
+    if "price_at_transaction" in df.columns and "Price At Transaction" not in df.columns:
+        df["Price At Transaction"] = pd.to_numeric(df["price_at_transaction"], errors="coerce")
+    if "current_price" in df.columns and "Current Price" not in df.columns:
+        df["Current Price"] = pd.to_numeric(df["current_price"], errors="coerce")
+
+    # ROI / Estimated Profit — same first-sell-closing heuristic as get_trades_data()
+    if "Price At Transaction" in df.columns and "Current Price" in df.columns:
+        df = df.sort_values("Transaction Date").reset_index(drop=True)
+        rois = []
+        for idx, row in df.iterrows():
+            if row["Type"] != "BUY" or pd.isna(row["Price At Transaction"]) or row["Price At Transaction"] == 0:
+                rois.append(np.nan)
+                continue
+            future_sells = df.iloc[idx + 1:]
+            matching_sells = future_sells[
+                (future_sells["Senator"] == row["Senator"]) &
+                (future_sells["Ticker"] == row["Ticker"]) &
+                (future_sells["Type"] == "SELL")
+            ]
+            if not matching_sells.empty:
+                sell_price = matching_sells.iloc[0]["Price At Transaction"]
+                calc_price = sell_price if not pd.isna(sell_price) and sell_price != 0 else row["Current Price"]
+            else:
+                calc_price = row["Current Price"]
+            if pd.isna(calc_price):
+                rois.append(np.nan)
+            else:
+                rois.append((calc_price - row["Price At Transaction"]) / row["Price At Transaction"])
+        df["Estimated ROI (%)"] = pd.Series(rois) * 100
+        df["Mid Point"] = pd.to_numeric(df["Mid Point"], errors="coerce").fillna(0)
+        df["Estimated Profit"] = (df["Estimated ROI (%)"] / 100) * df["Mid Point"]
+
+    return df
+
+
 df = get_trades_data(365)
+vol_year_df = get_volume_by_year_data()
+all_trades_df = get_all_trades_data()
 
 
 # If there is no data in the DB yet, show a clear message instead of
@@ -415,6 +497,38 @@ if page == "Executive Dashboard":
         width='stretch',
     )
     
+    # --- Trade Volume by Year ---
+    st.markdown("### Trade Volume by Year")
+
+    if not vol_year_df.empty:
+        # Apply the same Chamber filter
+        year_filtered = vol_year_df[vol_year_df["Chamber"].isin(selected_chambers)] if selected_chambers else vol_year_df
+
+        year_agg = (
+            year_filtered[year_filtered["Type"].isin(["BUY", "SELL"])]
+            .groupby(["Year", "Type"])["Mid Point"]
+            .sum()
+            .reset_index()
+        )
+
+        fig_year = px.bar(
+            year_agg,
+            x="Year",
+            y="Mid Point",
+            color="Type",
+            barmode="group",
+            title="Annual Trade Volume — Buy vs Sell",
+            template="plotly_dark",
+            color_discrete_map={"BUY": "#10b981", "SELL": "#ef4444"},
+        )
+        fig_year.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(tickmode="linear", dtick=1),
+            yaxis_title="Volume (Mid Point $)",
+        )
+        st.plotly_chart(fig_year, width="stretch")
+
     # Leaderboard of Senator Average ROI
     if "Estimated ROI (%)" in df.columns:
         st.markdown("## Top Politicians by ROI (Copy-Trade Strategy)")
@@ -578,6 +692,186 @@ elif page == "Senator Deep-Dives":
         )
         st.plotly_chart(fig_type, width='stretch')
 
+    # Trade Volume by Year for this senator
+    st.markdown("### Trade Volume by Year")
+    senator_year_df = vol_year_df[vol_year_df["Senator"] == selected_senator] if not vol_year_df.empty else pd.DataFrame()
+
+    if not senator_year_df.empty:
+        senator_year_agg = (
+            senator_year_df[senator_year_df["Type"].isin(["BUY", "SELL"])]
+            .groupby(["Year", "Type"])["Mid Point"]
+            .sum()
+            .reset_index()
+        )
+        fig_sen_year = px.bar(
+            senator_year_agg,
+            x="Year",
+            y="Mid Point",
+            color="Type",
+            barmode="group",
+            title=f"{selected_senator} — Annual Trade Volume",
+            template="plotly_dark",
+            color_discrete_map={"BUY": "#10b981", "SELL": "#ef4444"},
+        )
+        fig_sen_year.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(tickmode="linear", dtick=1),
+            yaxis_title="Volume (Mid Point $)",
+        )
+        st.plotly_chart(fig_sen_year, width="stretch")
+    else:
+        st.info("No annual volume data available for this legislator.")
+
+    # --- Current Holdings + Portfolio Performance ---
+    senator_all_df = all_trades_df[all_trades_df["Senator"] == selected_senator] if not all_trades_df.empty else pd.DataFrame()
+    open_positions, closed_trades = track_positions(senator_all_df) if not senator_all_df.empty else (pd.DataFrame(), pd.DataFrame())
+
+    st.markdown("### Current Holdings")
+    st.caption(
+        "Positions tracked using a stateful model: BUY opens/adds to long, "
+        "SELL closes long or opens short, and vice versa. "
+        "Share counts are estimated from mid_point ÷ price_at_transaction."
+    )
+
+    if open_positions.empty:
+        st.info("No open positions found for this legislator.")
+    else:
+        # Only include positions where current price was fetched, so all three
+        # KPIs are computed over the same subset and remain internally consistent.
+        priced = open_positions[open_positions["Current Price"].notna()]
+        total_current_value = priced["Current Value"].sum(skipna=True)
+        total_cost_basis = priced["Cost Basis"].sum(skipna=True)
+        total_unrealized_pnl = priced["Unrealized P&L"].sum(skipna=True)
+
+        h_col1, h_col2, h_col3 = st.columns(3)
+        with h_col1:
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">Est. Portfolio Value</div>'
+                f'<div class="metric-value">${total_current_value:,.0f}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with h_col2:
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">Total Cost Basis</div>'
+                f'<div class="metric-value">${total_cost_basis:,.0f}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with h_col3:
+            pnl_color = "#10b981" if total_unrealized_pnl >= 0 else "#ef4444"
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">Total Unrealized P&L</div>'
+                f'<div class="metric-value" style="color:{pnl_color}">${total_unrealized_pnl:,.0f}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+        st.dataframe(
+            open_positions,
+            column_config={
+                "Ticker": st.column_config.TextColumn("Ticker"),
+                "Sector": st.column_config.TextColumn("Sector"),
+                "Direction": st.column_config.TextColumn("Direction"),
+                "Shares (Est)": st.column_config.NumberColumn("Shares (Est)", format="%.1f"),
+                "Avg Entry Price": st.column_config.NumberColumn("Avg Entry Price", format="$%.2f"),
+                "Current Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
+                "Cost Basis": st.column_config.NumberColumn("Cost Basis", format="$%d"),
+                "Current Value": st.column_config.NumberColumn("Current Value", format="$%d"),
+                "Unrealized P&L": st.column_config.NumberColumn("Unrealized P&L", format="$%d"),
+                "ROI (%)": st.column_config.NumberColumn("ROI", format="%.2f%%"),
+                "Opened Date": st.column_config.DateColumn("Opened Date"),
+                "Last Trade Date": st.column_config.DateColumn("Last Trade Date"),
+            },
+            hide_index=True,
+            width="stretch",
+        )
+
+    # --- Portfolio Performance Tracker ---
+    st.markdown("### Portfolio Performance")
+    st.caption(
+        "Estimated portfolio value over time. Precomputed weekly — "
+        "run `python -m ingest.portfolio_snapshots` to populate for the first time."
+    )
+
+    # Try DB-backed curve first (fast). Fall back to live computation only if
+    # no snapshots exist yet (first run before weekly ingest has executed).
+    curve_df = load_portfolio_curve(selected_senator)
+    if curve_df.empty and not senator_all_df.empty:
+        st.info("No precomputed curve found. Computing live — this may take a minute...")
+        with st.spinner("Building portfolio curve (fetching historical prices)..."):
+            curve_df = compute_portfolio_curve(senator_all_df)
+
+    if curve_df.empty or curve_df["portfolio_value"].sum() == 0:
+        st.info("Not enough data to build a portfolio curve for this legislator.")
+    else:
+        # Portfolio curve chart
+        fig_curve = px.area(
+            curve_df,
+            x="date",
+            y="portfolio_value",
+            title=f"{selected_senator} — Estimated Portfolio Value Over Time",
+            template="plotly_dark",
+            color_discrete_sequence=["#3b82f6"],
+        )
+        fig_curve.update_layout(
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            yaxis_title="Portfolio Value ($)",
+            xaxis_title="Date",
+        )
+
+        # Overlay buy/sell events as markers
+        if not senator_all_df.empty:
+            events = senator_all_df[senator_all_df["Type"].isin(["BUY", "SELL"])].copy()
+            events["Transaction Date"] = pd.to_datetime(events["Transaction Date"])
+            buy_events = events[events["Type"] == "BUY"]
+            sell_events = events[events["Type"] == "SELL"]
+
+            fig_curve.add_scatter(
+                x=buy_events["Transaction Date"], y=[0] * len(buy_events),
+                mode="markers", marker=dict(color="#10b981", size=8, symbol="triangle-up"),
+                name="BUY",
+            )
+            fig_curve.add_scatter(
+                x=sell_events["Transaction Date"], y=[0] * len(sell_events),
+                mode="markers", marker=dict(color="#ef4444", size=8, symbol="triangle-down"),
+                name="SELL",
+            )
+
+        st.plotly_chart(fig_curve, width="stretch")
+
+        # Risk/return metrics
+        metrics = compute_portfolio_metrics(curve_df, closed_trades)
+
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+
+        def _fmt_metric(val, fmt):
+            return fmt.format(val) if val is not None else "N/A"
+
+        with m_col1:
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">Max Drawdown</div>'
+                f'<div class="metric-value" style="color:#ef4444">{_fmt_metric(metrics["max_drawdown_pct"], "{:.1f}%")}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with m_col2:
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">Beta (vs SPY)</div>'
+                f'<div class="metric-value">{_fmt_metric(metrics["beta"], "{:.2f}")}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with m_col3:
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">Sharpe Ratio</div>'
+                f'<div class="metric-value">{_fmt_metric(metrics["sharpe"], "{:.2f}")}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with m_col4:
+            st.markdown(
+                f'<div class="metric-card"><div class="metric-label">Win Rate (Closed)</div>'
+                f'<div class="metric-value">{_fmt_metric(metrics["win_rate_pct"], "{:.1f}%")}</div></div>',
+                unsafe_allow_html=True,
+            )
+
     st.markdown("### Individual Transaction History")
 
     history_cols = [
@@ -591,10 +885,13 @@ elif page == "Senator Deep-Dives":
         "Sector",
     ]
     
-    if "Estimated Profit" in senator_df.columns and "Estimated ROI (%)" in senator_df.columns:
+    if "Estimated Profit" in senator_all_df.columns and "Estimated ROI (%)" in senator_all_df.columns:
         history_cols.extend(["Price At Transaction", "Current Price", "Estimated Profit", "Estimated ROI (%)"])
 
-    history_df = senator_df[history_cols].sort_values(
+    # Use senator_all_df so Congress API trades (pre-2024) are also visible,
+    # not just the Senate PTR filings loaded into the 365-day senator_df.
+    available_cols = [c for c in history_cols if c in senator_all_df.columns]
+    history_df = senator_all_df[available_cols].sort_values(
         ["Filing Date", "Transaction Date"], ascending=[False, False]
     )
 

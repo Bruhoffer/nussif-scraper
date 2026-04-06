@@ -19,6 +19,25 @@ from bs4 import BeautifulSoup
 from .session import BASE_URL
 
 
+def _normalise_display_name(role: str) -> str:
+    """Convert PTR "Last, First Middle (Senator)" format to "First Middle Last".
+
+    Examples:
+        "Mullin, Markwayne (Senator)"       -> "Markwayne Mullin"
+        "Capito, Shelley Moore (Senator)"   -> "Shelley Moore Capito"
+        "McConnell, A. Mitchell Jr. (Senator)" -> "A. Mitchell Jr. McConnell"
+
+    If the string doesn't match the expected pattern it is returned unchanged.
+    """
+    import re
+    # Strip trailing " (Senator)", " (Representative)", etc.
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", role).strip()
+    if "," not in cleaned:
+        return role.strip()
+    last, first = cleaned.split(",", 1)
+    return f"{first.strip()} {last.strip()}"
+
+
 def parse_report_row(row: list[str]) -> dict:
     """Parse a single report row from the search API into a dict.
 
@@ -77,7 +96,7 @@ def parse_report_row(row: list[str]) -> dict:
     return {
         "senator_first_name": first_name.strip(),
         "senator_last_name": last_name.strip(),
-        "senator_display_name": role.strip(),
+        "senator_display_name": _normalise_display_name(role),
         "chamber": "Senate",
         "report_type": report_type,
         "report_format": report_format,

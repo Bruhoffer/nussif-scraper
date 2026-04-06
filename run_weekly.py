@@ -20,6 +20,7 @@ load_dotenv()
 
 from ingest.senate_ptr import run_ingest as senate_ingest
 from ingest.congress_api import run_ingest as congress_ingest
+from ingest.portfolio_snapshots import run_snapshot_ingest
 
 
 def main() -> None:
@@ -28,6 +29,9 @@ def main() -> None:
 
     print("\n=== Weekly ingest: Congress API (full history) ===")
     congress_ingest()
+
+    print("\n=== Weekly ingest: Portfolio snapshots ===")
+    run_snapshot_ingest()
 
 
 if __name__ == "__main__":

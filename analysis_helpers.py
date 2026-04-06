@@ -24,6 +24,7 @@ from typing import Iterable, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 from sqlalchemy import text
 
 from db.config import SessionLocal, engine
@@ -423,6 +424,526 @@ def top_senators_by_quarter(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Stateful position tracker
+# ---------------------------------------------------------------------------
+
+
+def _normalise_senator_df(senator_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalise column names to lowercase internal names.
+
+    The app layer renames DB columns to Title Case for display.  All
+    analysis functions work with the lowercase internal names so they
+    are independent of the UI renaming.
+    """
+    df = senator_df.copy()
+    rename = {
+        "Transaction Date": "transaction_date",
+        "Filing Date": "filing_date",
+        "Senator": "senator_display_name",
+        "Type": "transaction_type",
+        "Amount Range": "amount_range_raw",
+        "Mid Point": "mid_point",
+        "Chamber": "chamber",
+        "Ticker": "ticker",
+        "Sector": "sector",
+        "Price At Transaction": "price_at_transaction",
+        "Current Price": "current_price",
+    }
+    df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+    # Drop duplicate columns produced when both Title Case and lowercase versions
+    # exist (e.g. all_trades_df carries both price_at_transaction and
+    # Price At Transaction). Keep the first occurrence.
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    _empty_float = pd.Series(dtype=float)
+    _empty_str   = pd.Series(dtype=str)
+
+    df["transaction_date"]    = pd.to_datetime(df["transaction_date"] if "transaction_date" in df.columns else _empty_str, errors="coerce")
+    df["mid_point"]           = pd.to_numeric(df["mid_point"]           if "mid_point"           in df.columns else _empty_float, errors="coerce").fillna(0)
+    df["price_at_transaction"]= pd.to_numeric(df["price_at_transaction"] if "price_at_transaction" in df.columns else _empty_float, errors="coerce")
+    df["current_price"]       = pd.to_numeric(df["current_price"]       if "current_price"       in df.columns else _empty_float, errors="coerce")
+    df["transaction_type"]    = (df["transaction_type"] if "transaction_type" in df.columns else _empty_str).str.upper()
+    if "sector" not in df.columns:
+        df["sector"] = "Unknown"
+
+    return df.sort_values("transaction_date").reset_index(drop=True)
+
+
+def track_positions(senator_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Walk trades chronologically and track position state per ticker.
+
+    Position state machine (per ticker):
+        flat (0)  + BUY  → open long  (shares > 0)
+        long      + BUY  → scale into long
+        long      + SELL → close long, realise P&L
+        flat (0)  + SELL → open short (shares < 0)
+        short     + SELL → scale into short
+        short     + BUY  → close short, realise P&L
+
+    Shares are estimated from mid_point / price_at_transaction because
+    actual share counts are not disclosed — values are directionally
+    correct but not precise.
+
+    Parameters
+    ----------
+    senator_df:
+        Full trade history for one senator (all time, all tickers).
+        Accepts both Title Case (app layer) and lowercase (DB layer) columns.
+
+    Returns
+    -------
+    open_positions : pd.DataFrame
+        One row per currently open position (long or short) with columns:
+        ticker, sector, direction, shares, avg_entry_price, current_price,
+        cost_basis, current_value, unrealized_pnl, roi_pct, opened_date,
+        last_trade_date.
+
+    closed_trades : pd.DataFrame
+        One row per completed round-trip with columns:
+        ticker, direction (of the closed leg), shares, entry_price,
+        exit_price, cost_basis, proceeds, realised_pnl, roi_pct,
+        open_date, close_date, holding_days.
+    """
+
+    if senator_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df = _normalise_senator_df(senator_df)
+    df = df[df["ticker"].notna() & (df["ticker"] != "")]
+
+    # positions[ticker] = {"shares": float, "avg_entry_price": float,
+    #                       "cost_basis": float, "opened_date": date,
+    #                       "sector": str}
+    positions: dict[str, dict] = {}
+    closed_rows: list[dict] = []
+
+    for _, row in df.iterrows():
+        ticker = row["ticker"]
+        tx_type = row["transaction_type"]
+        price = row["price_at_transaction"]
+        mid = row["mid_point"]
+        tx_date = row["transaction_date"]
+        sector = row.get("sector") or "Unknown"
+
+        if pd.isna(price) or price <= 0 or mid <= 0:
+            continue
+        if tx_type not in ("BUY", "SELL"):
+            continue
+
+        shares_transacted = mid / price
+        pos = positions.get(ticker)
+
+        if tx_type == "BUY":
+            if pos is None or pos["shares"] == 0:
+                # Open new long (or re-enter after flat)
+                positions[ticker] = {
+                    "shares": shares_transacted,
+                    "avg_entry_price": price,
+                    "cost_basis": mid,
+                    "opened_date": tx_date,
+                    "sector": sector,
+                }
+            elif pos["shares"] > 0:
+                # Scale into existing long — update avg entry price
+                total_shares = pos["shares"] + shares_transacted
+                total_cost = pos["cost_basis"] + mid
+                positions[ticker] = {
+                    "shares": total_shares,
+                    "avg_entry_price": total_cost / total_shares,
+                    "cost_basis": total_cost,
+                    "opened_date": pos["opened_date"],
+                    "sector": sector,
+                }
+            else:
+                # pos["shares"] < 0 → closing a short position
+                closed_shares = min(shares_transacted, abs(pos["shares"]))
+                proceeds = closed_shares * pos["avg_entry_price"]  # what we received when shorting
+                cost_to_close = closed_shares * price
+                realised_pnl = proceeds - cost_to_close
+                roi_pct = (realised_pnl / proceeds * 100) if proceeds else None
+
+                closed_rows.append({
+                    "Ticker": ticker,
+                    "Direction": "SHORT",
+                    "Shares": closed_shares,
+                    "Entry Price": pos["avg_entry_price"],
+                    "Exit Price": price,
+                    "Cost Basis": proceeds,
+                    "Proceeds": cost_to_close,
+                    "Realised P&L": realised_pnl,
+                    "ROI (%)": roi_pct,
+                    "Open Date": pos["opened_date"],
+                    "Close Date": tx_date,
+                    "Holding Days": max((tx_date - pos["opened_date"]).days, 0) if pd.notna(pos["opened_date"]) else None,
+                })
+
+                remaining = pos["shares"] + shares_transacted  # shares < 0, adding positive
+                if remaining >= 0:
+                    positions[ticker] = {"shares": 0, "avg_entry_price": 0, "cost_basis": 0,
+                                         "opened_date": None, "sector": sector}
+                else:
+                    positions[ticker] = {**pos, "shares": remaining,
+                                         "cost_basis": abs(remaining) * pos["avg_entry_price"]}
+
+        else:  # SELL
+            if pos is None or pos["shares"] == 0:
+                # Open new short
+                positions[ticker] = {
+                    "shares": -shares_transacted,
+                    "avg_entry_price": price,
+                    "cost_basis": mid,
+                    "opened_date": tx_date,
+                    "sector": sector,
+                }
+            elif pos["shares"] < 0:
+                # Scale into existing short
+                total_shares = pos["shares"] - shares_transacted  # more negative
+                total_cost = pos["cost_basis"] + mid
+                positions[ticker] = {
+                    "shares": total_shares,
+                    "avg_entry_price": total_cost / abs(total_shares),
+                    "cost_basis": total_cost,
+                    "opened_date": pos["opened_date"],
+                    "sector": sector,
+                }
+            else:
+                # pos["shares"] > 0 → closing a long position
+                closed_shares = min(shares_transacted, pos["shares"])
+                cost_basis = closed_shares * pos["avg_entry_price"]
+                proceeds = closed_shares * price
+                realised_pnl = proceeds - cost_basis
+                roi_pct = (realised_pnl / cost_basis * 100) if cost_basis else None
+
+                closed_rows.append({
+                    "Ticker": ticker,
+                    "Direction": "LONG",
+                    "Shares": closed_shares,
+                    "Entry Price": pos["avg_entry_price"],
+                    "Exit Price": price,
+                    "Cost Basis": cost_basis,
+                    "Proceeds": proceeds,
+                    "Realised P&L": realised_pnl,
+                    "ROI (%)": roi_pct,
+                    "Open Date": pos["opened_date"],
+                    "Close Date": tx_date,
+                    "Holding Days": max((tx_date - pos["opened_date"]).days, 0) if pd.notna(pos["opened_date"]) else None,
+                })
+
+                remaining = pos["shares"] - shares_transacted
+                if remaining <= 0:
+                    positions[ticker] = {"shares": 0, "avg_entry_price": 0, "cost_basis": 0,
+                                         "opened_date": None, "sector": sector}
+                else:
+                    positions[ticker] = {**pos, "shares": remaining,
+                                         "cost_basis": remaining * pos["avg_entry_price"]}
+
+    # Build open positions DataFrame
+    open_rows: list[dict] = []
+    for ticker, pos in positions.items():
+        if pos["shares"] == 0:
+            continue
+
+        current_price = df[df["ticker"] == ticker]["current_price"].dropna()
+        cp = float(current_price.iloc[-1]) if not current_price.empty else None
+
+        shares = pos["shares"]
+        avg_entry = pos["avg_entry_price"]
+        cost_basis = pos["cost_basis"]
+        direction = "LONG" if shares > 0 else "SHORT"
+
+        if cp is not None:
+            current_value = abs(shares) * cp
+            if direction == "LONG":
+                unrealized_pnl = current_value - cost_basis
+            else:
+                unrealized_pnl = cost_basis - current_value  # short: profit when price falls
+            roi_pct = (unrealized_pnl / cost_basis * 100) if cost_basis else None
+        else:
+            current_value = None
+            unrealized_pnl = None
+            roi_pct = None
+
+        sector = df[df["ticker"] == ticker]["sector"].dropna()
+        sector_val = sector.iloc[0] if not sector.empty else "Unknown"
+
+        open_rows.append({
+            "Ticker": ticker,
+            "Sector": sector_val,
+            "Direction": direction,
+            "Shares (Est)": abs(shares),
+            "Avg Entry Price": avg_entry,
+            "Current Price": cp,
+            "Cost Basis": cost_basis,
+            "Current Value": current_value,
+            "Unrealized P&L": unrealized_pnl,
+            "ROI (%)": roi_pct,
+            "Opened Date": pos["opened_date"],
+            "Last Trade Date": df[df["ticker"] == ticker]["transaction_date"].max(),
+        })
+
+    open_positions = pd.DataFrame(open_rows)
+    if not open_positions.empty:
+        open_positions = open_positions.sort_values("Current Value", ascending=False, na_position="last").reset_index(drop=True)
+
+    closed_trades = pd.DataFrame(closed_rows) if closed_rows else pd.DataFrame()
+
+    return open_positions, closed_trades
+
+
+# ---------------------------------------------------------------------------
+# Portfolio curve
+# ---------------------------------------------------------------------------
+
+
+def compute_portfolio_curve(
+    senator_df: pd.DataFrame,
+    freq: str = "ME",
+    start_from: dt.date | None = None,
+) -> pd.DataFrame:
+    """Build a time series of estimated portfolio value.
+
+    For each period-end date from the senator's first trade to today,
+    sums the mark-to-market value of all open positions at that date
+    using the shared PriceCache (backed by yfinance).
+
+    Short positions contribute negative value (mark-to-market loss if
+    price rises, gain if price falls).
+
+    Parameters
+    ----------
+    senator_df:
+        Full trade history for one senator.
+    freq:
+        Pandas offset alias for the resampling frequency.
+        "ME" = month-end (default), "W" = weekly, "QE" = quarter-end.
+    start_from:
+        If provided, only compute period-ends strictly after this date.
+        Used for delta updates — pass the last stored snapshot date so
+        only new months are computed instead of the full history.
+        Note: even when start_from is set, the full trade history in
+        senator_df is still used to correctly replay positions at each
+        new period-end (historical trades affect current open positions).
+
+    Returns
+    -------
+    pd.DataFrame with columns: date, portfolio_value.
+    Empty DataFrame if there is insufficient data.
+    """
+
+    if senator_df.empty:
+        return pd.DataFrame()
+
+    df = _normalise_senator_df(senator_df)
+    df = df[df["ticker"].notna() & (df["ticker"] != "")]
+
+    first_date = df["transaction_date"].min()
+    if pd.isna(first_date):
+        return pd.DataFrame()
+
+    today = dt.date.today()
+    period_ends = pd.date_range(start=first_date, end=today, freq=freq).date.tolist()
+    if not period_ends or period_ends[-1] < today:
+        period_ends.append(today)
+
+    # Delta mode: skip period-ends already stored in the DB
+    if start_from is not None:
+        period_ends = [d for d in period_ends if d > start_from]
+        if not period_ends:
+            return pd.DataFrame()
+
+    # --- Single-pass position tracking ---
+    # Walk trades and period-ends together in one pass instead of replaying
+    # track_positions() from scratch at every period-end (O(n) vs O(n²)).
+    #
+    # positions[ticker] mirrors the state dict used in track_positions():
+    #   {"shares": float, "avg_entry_price": float, "cost_basis": float}
+    positions: dict[str, dict] = {}
+    trade_idx = 0
+    trades_list = df.to_dict("records")  # avoid repeated DataFrame slicing
+    n_trades = len(trades_list)
+
+    # --- Pre-fetch all required prices into PriceCache ---
+    # Collect every (ticker, period_date) pair we will need, then fetch them
+    # all up front so the main loop only does fast DB reads, not yfinance calls.
+    # Track failed tickers so each bad symbol is only attempted once, not once
+    # per period-end (avoids dozens of identical yfinance error messages).
+    all_tickers = df["ticker"].dropna().unique().tolist()
+    failed_tickers: set[str] = set()
+    with SessionLocal() as session:
+        for ticker in all_tickers:
+            if ticker in failed_tickers:
+                continue
+            for period_date in period_ends:
+                price = get_price_on_or_before(session, ticker, period_date)
+                if price is None:
+                    # First miss — mark as failed so we skip remaining dates
+                    failed_tickers.add(ticker)
+                    break
+        session.commit()
+
+    # --- Main loop: single pass over period_ends ---
+    curve_rows: list[dict] = []
+
+    with SessionLocal() as session:
+        for period_date in period_ends:
+            # Advance trades up to and including this period_date
+            while trade_idx < n_trades:
+                row = trades_list[trade_idx]
+                tx_date = row["transaction_date"]
+                if isinstance(tx_date, pd.Timestamp):
+                    tx_date = tx_date.date()
+                if tx_date > period_date:
+                    break
+
+                ticker = row.get("ticker")
+                tx_type = str(row.get("transaction_type") or "").upper()
+                price = row.get("price_at_transaction")
+                mid = row.get("mid_point") or 0
+
+                if ticker and tx_type in ("BUY", "SELL") and price and price > 0 and mid > 0:
+                    shares_transacted = mid / price
+                    pos = positions.get(ticker, {"shares": 0, "avg_entry_price": 0, "cost_basis": 0})
+
+                    if tx_type == "BUY":
+                        if pos["shares"] >= 0:
+                            total_shares = pos["shares"] + shares_transacted
+                            total_cost = pos["cost_basis"] + mid
+                            positions[ticker] = {
+                                "shares": total_shares,
+                                "avg_entry_price": total_cost / total_shares,
+                                "cost_basis": total_cost,
+                            }
+                        else:  # closing short
+                            remaining = pos["shares"] + shares_transacted
+                            positions[ticker] = {
+                                "shares": remaining,
+                                "avg_entry_price": pos["avg_entry_price"],
+                                "cost_basis": abs(remaining) * pos["avg_entry_price"] if remaining < 0 else 0,
+                            }
+                    else:  # SELL
+                        if pos["shares"] <= 0:
+                            total_shares = pos["shares"] - shares_transacted
+                            total_cost = pos["cost_basis"] + mid
+                            positions[ticker] = {
+                                "shares": total_shares,
+                                "avg_entry_price": total_cost / abs(total_shares),
+                                "cost_basis": total_cost,
+                            }
+                        else:  # closing long
+                            remaining = pos["shares"] - shares_transacted
+                            positions[ticker] = {
+                                "shares": remaining,
+                                "avg_entry_price": pos["avg_entry_price"],
+                                "cost_basis": remaining * pos["avg_entry_price"] if remaining > 0 else 0,
+                            }
+
+                trade_idx += 1
+
+            # Mark open positions to market at this period_date
+            total_value = 0.0
+            for ticker, pos in positions.items():
+                if pos["shares"] == 0 or ticker in failed_tickers:
+                    continue
+                price = get_price_on_or_before(session, ticker, period_date)
+                if price is None:
+                    continue
+                pos_value = abs(pos["shares"]) * price
+                total_value += pos_value if pos["shares"] > 0 else -pos_value
+
+            curve_rows.append({"date": period_date, "portfolio_value": total_value})
+
+    return pd.DataFrame(curve_rows)
+
+
+# ---------------------------------------------------------------------------
+# Portfolio metrics: max drawdown, beta, sharpe, win rate
+# ---------------------------------------------------------------------------
+
+
+def compute_portfolio_metrics(
+    curve_df: pd.DataFrame,
+    closed_trades: pd.DataFrame,
+) -> dict:
+    """Compute summary risk/return metrics from the portfolio curve.
+
+    Parameters
+    ----------
+    curve_df:
+        Output of compute_portfolio_curve — columns: date, portfolio_value.
+    closed_trades:
+        Output of track_positions — completed round-trips with Realised P&L.
+
+    Returns
+    -------
+    dict with keys:
+        max_drawdown_pct   – worst peak-to-trough drawdown (negative %)
+        beta               – portfolio beta vs SPY (None if insufficient data)
+        sharpe             – annualised Sharpe ratio (None if insufficient data)
+        win_rate_pct       – % of closed trades with positive realised P&L
+        total_realised_pnl – sum of all closed trade P&L
+    """
+
+    result = {
+        "max_drawdown_pct": None,
+        "beta": None,
+        "sharpe": None,
+        "win_rate_pct": None,
+        "total_realised_pnl": None,
+    }
+
+    # --- Win rate & realised P&L from closed trades ---
+    if not closed_trades.empty and "Realised P&L" in closed_trades.columns:
+        pnl = closed_trades["Realised P&L"].dropna()
+        if not pnl.empty:
+            result["win_rate_pct"] = float((pnl > 0).mean() * 100)
+            result["total_realised_pnl"] = float(pnl.sum())
+
+    if curve_df.empty or len(curve_df) < 3:
+        return result
+
+    values = curve_df["portfolio_value"].values.astype(float)
+
+    # --- Max drawdown ---
+    peak = np.maximum.accumulate(values)
+    drawdowns = np.where(peak > 0, (values - peak) / peak, 0.0)
+    result["max_drawdown_pct"] = float(drawdowns.min() * 100)
+
+    # --- Monthly returns for Sharpe and Beta ---
+    monthly = (
+        curve_df
+        .assign(date=pd.to_datetime(curve_df["date"]))
+        .set_index("date")["portfolio_value"]
+        .resample("ME").last()
+        .dropna()
+    )
+    if len(monthly) < 3:
+        return result
+
+    port_returns = monthly.pct_change().dropna()
+    if port_returns.empty:
+        return result
+
+    # Sharpe (annualised, risk-free ≈ 0 for simplicity)
+    if port_returns.std() > 0:
+        result["sharpe"] = float((port_returns.mean() / port_returns.std()) * np.sqrt(12))
+
+    # Beta vs SPY
+    try:
+        spy_hist = yf.download("SPY", start=monthly.index[0], end=monthly.index[-1], progress=False)
+        if not spy_hist.empty:
+            spy_monthly = spy_hist["Close"].resample("ME").last().pct_change().dropna()
+            aligned = port_returns.align(spy_monthly, join="inner")
+            p_ret, m_ret = aligned[0].values, aligned[1].values
+            if len(p_ret) >= 3 and m_ret.std() > 0:
+                cov = np.cov(p_ret, m_ret)
+                result["beta"] = float(cov[0, 1] / cov[1, 1])
+    except Exception:
+        pass  # Beta is best-effort; missing SPY data should not break the page
+
+    return result
+
+
 __all__ = [
     "load_trades_window",
     "prepare_trades",
@@ -432,4 +953,7 @@ __all__ = [
     "quartile_stats_for_senators",
     "quartile_stats_for_tickers",
     "top_senators_by_quarter",
+    "track_positions",
+    "compute_portfolio_curve",
+    "compute_portfolio_metrics",
 ]
