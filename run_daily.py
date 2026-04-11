@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from ingest.senate_ptr import run_ingest
+from ingest.activist_filings import run_ingest as activist_ingest
 
 
 def main() -> None:
@@ -29,6 +30,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     run_ingest(days=args.days)
+
+    # 13D/G filings are filed daily — pick up last 3 days
+    activist_ingest(days=3)
 
 
 if __name__ == "__main__":

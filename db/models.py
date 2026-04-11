@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Column, Date, Float, Integer, String, UniqueConstraint
+from sqlalchemy import Column, Date, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import declarative_base
 
 
@@ -133,4 +133,67 @@ class PriceCache(Base):
         UniqueConstraint("ticker", "date", name="uq_price_cache_ticker_date"),
     )
 
+
+class LobbyingFiling(Base):
+    """Corporate lobbying disclosure from the Senate LDA API (lda.senate.gov).
+
+    Each row is one quarterly LD-2 filing. ``client_name`` is the company
+    paying for the lobbying; ``registrant_name`` is the lobbying firm hired.
+    """
+
+    __tablename__ = "lobbying_filings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    filing_uuid = Column(String(100), unique=True, index=True)
+    client_name = Column(String(300), index=True)
+    ticker = Column(String(32), index=True)       # nullable — mapped by ticker_mapper
+    registrant_name = Column(String(300))
+    amount = Column(Float)
+    filing_date = Column(Date, index=True)
+    period_of_lobbying = Column(String(50))        # e.g. "Q1 2026"
+    specific_issues = Column(Text)                 # truncated free-text summary
+    source_url = Column(String(500))
+
+
+class GovContract(Base):
+    """Federal contract award from USASpending.gov.
+
+    ``award_id`` is the USASpending unique identifier used for upserts.
+    """
+
+    __tablename__ = "gov_contracts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    award_id = Column(String(200), unique=True, index=True)
+    recipient_name = Column(String(300), index=True)
+    ticker = Column(String(32), index=True)        # nullable — mapped by ticker_mapper
+    award_amount = Column(Float)
+    award_date = Column(Date, index=True)
+    funding_agency = Column(String(200))
+    description = Column(Text)
+
+
+class ActivistFiling(Base):
+    """SEC Schedule 13D/G activist or passive beneficial-ownership filing.
+
+    ``target_company`` is the issuer (the stock being held).
+    ``lead_investor`` is the filer (the activist fund or individual).
+    ``accession_number`` is the EDGAR unique identifier used for upserts.
+    """
+
+    __tablename__ = "activist_filings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    accession_number = Column(String(30), unique=True, index=True)
+    ticker = Column(String(32), index=True)        # nullable — mapped by ticker_mapper
+    target_company = Column(String(300), index=True)
+    lead_investor = Column(String(300))
+    form_type = Column(String(20))                 # SC 13D, SC 13D/A, SC 13G, SC 13G/A
+    filing_date = Column(Date, index=True)
+    shares = Column(Float)
+    prev_shares = Column(Float)
+    ownership_pct = Column(Float)
+    shares_change_pct = Column(Float)
+    market_cap_m = Column(Float)
+    sec_url = Column(String(500))
 

@@ -97,45 +97,50 @@ def _upsert_snapshots(senator: str, curve_df: pd.DataFrame) -> int:
     return upserted
 
 
+def _process_senator(senator: str) -> tuple[str, int, str]:
+    """Load trades, compute curve, and upsert snapshots for one senator.
+
+    Returns (senator, rows_upserted, status_message).
+    Designed to run inside a thread-pool worker.
+    """
+    from analysis_helpers import compute_portfolio_curve
+
+    trades_df = _load_senator_trades(senator)
+    if trades_df.empty:
+        return senator, 0, "no trades"
+
+    last_date = _get_last_snapshot_date(senator)
+    curve_df = compute_portfolio_curve(trades_df, start_from=last_date)
+
+    if curve_df.empty:
+        return senator, 0, "curve empty"
+
+    count = _upsert_snapshots(senator, curve_df)
+    delta_label = f"delta from {last_date}" if last_date else "full history"
+    return senator, count, f"upserted {count} rows ({delta_label})"
+
+
 def run_snapshot_ingest(senator_filter: str | None = None) -> None:
     """Compute and store portfolio curves for all (or one) senator(s).
+
+    Runs sequentially — parallelism is counter-productive here because the
+    bottleneck is yfinance rate limits and SQLite price_cache writes, both
+    of which serialize under concurrent load.
 
     Parameters
     ----------
     senator_filter:
         If provided, only compute for this senator. Otherwise processes all.
     """
-    # analysis_helpers imports db internals — import here to avoid circular
-    # issues at module load time and to keep this script self-contained.
-    from analysis_helpers import compute_portfolio_curve
-
     init_db()
 
     senators = [senator_filter] if senator_filter else _get_all_senators()
-    print(f"[portfolio_snapshots] Computing curves for {len(senators)} senator(s)...")
+    total = len(senators)
+    print(f"[portfolio_snapshots] Computing curves for {total} senator(s)...")
 
     for i, senator in enumerate(senators):
-        print(f"[portfolio_snapshots] [{i + 1}/{len(senators)}] {senator}")
-        trades_df = _load_senator_trades(senator)
-
-        if trades_df.empty:
-            print(f"  → No trades found, skipping.")
-            continue
-
-        last_date = _get_last_snapshot_date(senator)
-        if last_date is not None:
-            print(f"  → Last snapshot: {last_date}. Computing delta only.")
-        else:
-            print(f"  → No snapshots yet. Computing full history.")
-
-        curve_df = compute_portfolio_curve(trades_df, start_from=last_date)
-
-        if curve_df.empty:
-            print(f"  → Curve empty (insufficient price data), skipping.")
-            continue
-
-        count = _upsert_snapshots(senator, curve_df)
-        print(f"  → Upserted {count} snapshot rows.")
+        senator, count, msg = _process_senator(senator)
+        print(f"[portfolio_snapshots] [{i + 1}/{total}] {senator} → {msg}")
 
     print("[portfolio_snapshots] Done.")
 

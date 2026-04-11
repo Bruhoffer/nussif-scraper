@@ -21,6 +21,9 @@ load_dotenv()
 from ingest.senate_ptr import run_ingest as senate_ingest
 from ingest.congress_api import run_ingest as congress_ingest
 from ingest.portfolio_snapshots import run_snapshot_ingest
+from ingest.lobbying import run_ingest as lobbying_ingest
+from ingest.gov_contracts import run_ingest as contracts_ingest
+from ingest.activist_filings import run_ingest as activist_ingest
 
 
 def main() -> None:
@@ -32,6 +35,15 @@ def main() -> None:
 
     print("\n=== Weekly ingest: Portfolio snapshots ===")
     run_snapshot_ingest()
+
+    print("\n=== Weekly ingest: Corporate lobbying (last 120 days) ===")
+    lobbying_ingest(days=120)
+
+    print("\n=== Weekly ingest: Government contracts (last 90 days) ===")
+    contracts_ingest(days=90)
+
+    print("\n=== Weekly ingest: Activist 13D/G filings (last 90 days) ===")
+    activist_ingest(days=90)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,12 @@ from dotenv import load_dotenv
 # importing data_access/db.config, which constructs the SQLAlchemy engine.
 load_dotenv()
 
-from data_access import load_trades_df, load_volume_by_year_df, load_all_trades_df, load_portfolio_curve
+from data_access import (
+    load_trades_df, load_volume_by_year_df, load_all_trades_df, load_portfolio_curve,
+    load_lobbying_df, load_lobbying_top_spenders,
+    load_gov_contracts_df, load_gov_contracts_top_recipients,
+    load_activist_filings_df, load_market_intelligence_overlap, load_ticker_timeline,
+)
 
 import sys
 import os
@@ -315,7 +320,7 @@ with st.sidebar:
 
     page = st.radio(
         "Navigation",
-        ["Executive Dashboard", "Live Intelligence Feed", "Senator Deep-Dives"],
+        ["Executive Dashboard", "Live Intelligence Feed", "Senator Deep-Dives", "Market Intelligence"],
         index=0
     )
     
@@ -907,6 +912,349 @@ elif page == "Senator Deep-Dives":
             "Estimated ROI (%)": st.column_config.NumberColumn("ROI", format="%.2f%%"),
         },
     )
+
+# --- PAGE 4: MARKET INTELLIGENCE ---
+elif page == "Market Intelligence":
+    st.title("🕵️ Market Intelligence")
+    st.caption(
+        "Corporate lobbying disclosures, federal contract awards, and activist investor "
+        "13D/G filings — cross-referenced with congressional trade activity."
+    )
+
+    tab_lobby, tab_contracts, tab_activist, tab_xref = st.tabs([
+        "🏛️ Corporate Lobbying",
+        "🏗️ Government Contracts",
+        "📋 Activist 13D Filings",
+        "🔗 Cross-Reference",
+    ])
+
+    # ── TAB 1: CORPORATE LOBBYING ──────────────────────────────────────────
+    with tab_lobby:
+        st.subheader("Corporate Lobbying Disclosures")
+        st.caption(
+            "Quarterly LD-2 filings from the Senate Lobbying Disclosure Act database. "
+            "Companies disclose lobbying spend and the specific issues they are lobbying on."
+        )
+
+        lobby_df = load_lobbying_df(days_back=120)
+
+        if lobby_df.empty:
+            st.info("No lobbying data yet. Run `python -m ingest.lobbying` to populate.")
+        else:
+            lobby_df["filing_date"] = pd.to_datetime(lobby_df["filing_date"])
+
+            # KPIs
+            k1, k2, k3 = st.columns(3)
+            total_spend = lobby_df["amount"].sum()
+            k1.metric("Total Lobbying Spend (120d)", f"${total_spend:,.0f}")
+            k2.metric("Unique Companies", lobby_df["client_name"].nunique())
+            if not lobby_df["amount"].isna().all():
+                top_spender = lobby_df.loc[lobby_df["amount"].idxmax(), "client_name"]
+                k3.metric("Top Spender", top_spender)
+
+            st.markdown("#### Top 15 Spenders")
+            top_df = load_lobbying_top_spenders(days_back=120)
+            if not top_df.empty:
+                fig = px.bar(
+                    top_df.head(15),
+                    x="label", y="total_amount",
+                    labels={"label": "Company / Ticker", "total_amount": "Total Spend ($)"},
+                    color="total_amount",
+                    color_continuous_scale="Blues",
+                )
+                fig.update_layout(
+                    paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
+                    font_color="#f8fafc", coloraxis_showscale=False,
+                    xaxis_tickangle=-35, height=380,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("#### Recent Filings")
+            lobby_search_col, keyword_col = st.columns(2)
+            ticker_filter = lobby_search_col.text_input("Filter by ticker", key="lobby_ticker")
+            keyword_filter = keyword_col.text_input("Filter by keyword (issues)", key="lobby_kw")
+
+            display = lobby_df.copy()
+            if ticker_filter:
+                display = display[display["ticker"].str.upper() == ticker_filter.upper()]
+            if keyword_filter:
+                mask = display["specific_issues"].str.contains(keyword_filter, case=False, na=False)
+                display = display[mask]
+
+            display["amount"] = display["amount"].apply(
+                lambda x: f"${x:,.0f}" if pd.notna(x) else "—"
+            )
+            display["specific_issues"] = display["specific_issues"].str[:120]
+            st.dataframe(
+                display[["filing_date", "ticker", "client_name", "registrant_name",
+                          "amount", "period_of_lobbying", "specific_issues"]].rename(columns={
+                    "filing_date": "Date", "ticker": "Ticker", "client_name": "Company",
+                    "registrant_name": "Lobby Firm", "amount": "Amount",
+                    "period_of_lobbying": "Period", "specific_issues": "Issues (truncated)",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── TAB 2: GOVERNMENT CONTRACTS ───────────────────────────────────────
+    with tab_contracts:
+        st.subheader("Federal Contract Awards")
+        st.caption(
+            "Contract awards from USASpending.gov — the official source of US federal spending. "
+            "Filtered to publicly-traded companies where a ticker match was found."
+        )
+
+        contracts_df = load_gov_contracts_df(days_back=90)
+
+        if contracts_df.empty:
+            st.info("No contract data yet. Run `python -m ingest.gov_contracts` to populate.")
+        else:
+            contracts_df["award_date"] = pd.to_datetime(contracts_df["award_date"])
+
+            # KPIs
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total Awarded (90d)", f"${contracts_df['award_amount'].sum():,.0f}")
+            c2.metric("Unique Recipients", contracts_df["recipient_name"].nunique())
+            top_agency = contracts_df["funding_agency"].value_counts().idxmax() \
+                if not contracts_df["funding_agency"].isna().all() else "—"
+            c3.metric("Top Funding Agency", top_agency)
+
+            st.markdown("#### Biggest Recipients (Last 90 Days)")
+            top_rec = load_gov_contracts_top_recipients(days_back=90)
+            if not top_rec.empty:
+                fig = px.bar(
+                    top_rec.head(15),
+                    x="label", y="total_amount",
+                    labels={"label": "Company / Ticker", "total_amount": "Total Awarded ($)"},
+                    color="total_amount",
+                    color_continuous_scale="Greens",
+                )
+                fig.update_layout(
+                    paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
+                    font_color="#f8fafc", coloraxis_showscale=False,
+                    xaxis_tickangle=-35, height=380,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("#### Recent Contracts")
+            contracts_display = contracts_df.copy()
+            contracts_display["award_amount"] = contracts_display["award_amount"].apply(
+                lambda x: f"${x:,.0f}" if pd.notna(x) else "—"
+            )
+            contracts_display["description"] = contracts_display["description"].str[:100]
+            st.dataframe(
+                contracts_display[["award_date", "ticker", "recipient_name",
+                                   "award_amount", "funding_agency", "description"]].rename(columns={
+                    "award_date": "Date", "ticker": "Ticker", "recipient_name": "Recipient",
+                    "award_amount": "Amount", "funding_agency": "Agency",
+                    "description": "Description (truncated)",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── TAB 3: ACTIVIST 13D FILINGS ───────────────────────────────────────
+    with tab_activist:
+        st.subheader("Activist & Beneficial Ownership Filings (13D/G)")
+        st.caption(
+            "Any investor acquiring ≥5% of a company must file with the SEC. "
+            "13D = activist intent to influence management. 13G = passive holding."
+        )
+
+        activist_df = load_activist_filings_df(days_back=90)
+
+        if activist_df.empty:
+            st.info("No 13D/G data yet. Run `python -m ingest.activist_filings` to populate.")
+        else:
+            activist_df["filing_date"] = pd.to_datetime(activist_df["filing_date"])
+
+            # Form type filter
+            form_types = sorted(activist_df["form_type"].dropna().unique().tolist())
+            selected_forms = st.multiselect(
+                "Filter by form type", form_types, default=form_types, key="activist_forms"
+            )
+            if selected_forms:
+                activist_df = activist_df[activist_df["form_type"].isin(selected_forms)]
+
+            # Colour code: green = increased/new, red = reduced/closed
+            def _row_style(row):
+                chg = row.get("shares_change_pct")
+                own = row.get("ownership_pct")
+                if chg is not None and not pd.isna(chg):
+                    return "increased" if chg >= 0 else "reduced"
+                if own is not None and not pd.isna(own) and own > 0:
+                    return "increased"
+                return "neutral"
+
+            activist_df["Direction"] = activist_df.apply(_row_style, axis=1)
+
+            display_cols = ["filing_date", "form_type", "ticker", "target_company",
+                            "lead_investor", "shares", "prev_shares",
+                            "shares_change_pct", "ownership_pct", "Direction"]
+            avail = [c for c in display_cols if c in activist_df.columns]
+            display = activist_df[avail].copy()
+            display["ownership_pct"] = display["ownership_pct"].apply(
+                lambda x: f"{x:.1f}%" if pd.notna(x) else "—"
+            )
+            display["shares_change_pct"] = display["shares_change_pct"].apply(
+                lambda x: f"{x:+.1f}%" if pd.notna(x) else "—"
+            )
+            display["shares"] = display["shares"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else "—"
+            )
+            display["prev_shares"] = display["prev_shares"].apply(
+                lambda x: f"{x:,.0f}" if pd.notna(x) else "—"
+            )
+
+            st.dataframe(
+                display.rename(columns={
+                    "filing_date": "Date", "form_type": "Form", "ticker": "Ticker",
+                    "target_company": "Target Company", "lead_investor": "Lead Investor",
+                    "shares": "Shares", "prev_shares": "Prev Shares",
+                    "shares_change_pct": "Chg %", "ownership_pct": "Ownership %",
+                }),
+                use_container_width=True, hide_index=True,
+            )
+
+    # ── TAB 4: CROSS-REFERENCE ────────────────────────────────────────────
+    with tab_xref:
+        st.subheader("Cross-Reference: Congress Trades ↔ Market Intelligence")
+        st.caption(
+            "Tickers where a senator traded AND the company appears in lobbying disclosures, "
+            "government contracts, or activist filings."
+        )
+
+        overlap_df = load_market_intelligence_overlap()
+
+        if overlap_df.empty:
+            st.info("No overlapping tickers yet — populate all three ingest pipelines first.")
+        else:
+            overlap_df["transaction_date"] = pd.to_datetime(overlap_df["transaction_date"])
+
+            # Summary counts
+            o1, o2, o3 = st.columns(3)
+            o1.metric("Overlapping Tickers", overlap_df["ticker"].nunique())
+            o2.metric("In Lobbying", int(overlap_df["in_lobbying"].any()))
+            o3.metric("In Gov Contracts", int(overlap_df["in_contracts"].any()))
+
+            st.markdown("#### Overlap Table")
+            st.dataframe(
+                overlap_df[["ticker", "senator_display_name", "transaction_date",
+                            "transaction_type", "mid_point",
+                            "in_lobbying", "in_contracts", "in_activist"]].rename(columns={
+                    "ticker": "Ticker", "senator_display_name": "Senator",
+                    "transaction_date": "Trade Date", "transaction_type": "Type",
+                    "mid_point": "Est. Value ($)",
+                    "in_lobbying": "Lobbying?", "in_contracts": "Gov Contract?",
+                    "in_activist": "Activist?",
+                }),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    "Est. Value ($)": st.column_config.NumberColumn(format="$%d"),
+                    "Lobbying?": st.column_config.CheckboxColumn(),
+                    "Gov Contract?": st.column_config.CheckboxColumn(),
+                    "Activist?": st.column_config.CheckboxColumn(),
+                },
+            )
+
+            st.markdown("---")
+            st.markdown("#### Timeline: Senator Trades vs Events")
+
+            overlap_tickers = sorted(overlap_df["ticker"].dropna().unique().tolist())
+            selected_ticker = st.selectbox(
+                "Select a ticker to view timeline", overlap_tickers, key="xref_ticker"
+            )
+
+            if selected_ticker:
+                tl = load_ticker_timeline(selected_ticker)
+                prices = tl.get("prices", pd.DataFrame())
+                trades = tl.get("trades", pd.DataFrame())
+                contracts = tl.get("contracts", pd.DataFrame())
+                lobbying = tl.get("lobbying", pd.DataFrame())
+                filings = tl.get("filings", pd.DataFrame())
+
+                if prices.empty and trades.empty:
+                    st.info("No price or trade data found for this ticker.")
+                else:
+                    fig = go.Figure()
+
+                    # Price line
+                    if not prices.empty:
+                        prices["date"] = pd.to_datetime(prices["date"])
+                        fig.add_trace(go.Scatter(
+                            x=prices["date"], y=prices["price"],
+                            mode="lines", name="Price",
+                            line=dict(color="#64748b", width=1.5),
+                        ))
+
+                    # Senator trades — BUY green, SELL red
+                    if not trades.empty:
+                        trades["date"] = pd.to_datetime(trades["date"])
+                        buys = trades[trades["transaction_type"].str.upper().str.contains("BUY|PURCHASE", na=False)]
+                        sells = trades[trades["transaction_type"].str.upper().str.contains("SELL|SALE", na=False)]
+                        for subset, color, symbol, label in [
+                            (buys, "#22c55e", "triangle-up", "Congress Buy"),
+                            (sells, "#ef4444", "triangle-down", "Congress Sell"),
+                        ]:
+                            if not subset.empty:
+                                hover = subset.apply(
+                                    lambda r: f"{r['senator_display_name']}<br>{r['transaction_type']}", axis=1
+                                )
+                                fig.add_trace(go.Scatter(
+                                    x=subset["date"],
+                                    y=[prices.loc[prices["date"] <= d, "price"].iloc[-1]
+                                       if not prices.empty and not prices[prices["date"] <= pd.to_datetime(d)].empty
+                                       else None
+                                       for d in subset["date"]],
+                                    mode="markers", name=label,
+                                    marker=dict(color=color, size=10, symbol=symbol),
+                                    text=hover, hovertemplate="%{text}<extra></extra>",
+                                ))
+
+                    # Contract awards — blue vertical lines
+                    if not contracts.empty:
+                        contracts["date"] = pd.to_datetime(contracts["date"])
+                        for _, row in contracts.iterrows():
+                            fig.add_vline(
+                                x=row["date"].timestamp() * 1000,
+                                line=dict(color="#3b82f6", width=1, dash="dot"),
+                                annotation_text=f"Contract: ${row['award_amount']:,.0f}" if pd.notna(row.get("award_amount")) else "Contract",
+                                annotation_font_size=9,
+                                annotation_font_color="#3b82f6",
+                            )
+
+                    # Lobbying filings — orange vertical lines
+                    if not lobbying.empty:
+                        lobbying["date"] = pd.to_datetime(lobbying["date"])
+                        for _, row in lobbying.iterrows():
+                            fig.add_vline(
+                                x=row["date"].timestamp() * 1000,
+                                line=dict(color="#f97316", width=1, dash="dash"),
+                                annotation_text="Lobby",
+                                annotation_font_size=9,
+                                annotation_font_color="#f97316",
+                            )
+
+                    # Activist filings — purple vertical lines
+                    if not filings.empty:
+                        filings["date"] = pd.to_datetime(filings["date"])
+                        for _, row in filings.iterrows():
+                            fig.add_vline(
+                                x=row["date"].timestamp() * 1000,
+                                line=dict(color="#a855f7", width=1, dash="longdash"),
+                                annotation_text=f"13D: {row.get('lead_investor','')[:20]}",
+                                annotation_font_size=9,
+                                annotation_font_color="#a855f7",
+                            )
+
+                    fig.update_layout(
+                        title=f"{selected_ticker} — Congress Trades vs Market Events",
+                        paper_bgcolor="#0f172a", plot_bgcolor="#1e293b",
+                        font_color="#f8fafc",
+                        legend=dict(bgcolor="#1e293b", bordercolor="#334155"),
+                        height=500,
+                        xaxis=dict(showgrid=True, gridcolor="#334155"),
+                        yaxis=dict(showgrid=True, gridcolor="#334155", title="Price ($)"),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
 # --- FOOTER ---
 st.markdown("---")

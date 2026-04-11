@@ -31,6 +31,11 @@ jobs:
         # Idempotent upsert means re-running is always safe.
         python run_daily.py --days 3
 
+    - name: Recompute portfolio snapshots
+      run: |
+        # Incremental — only adds snapshots for dates newer than the last stored one.
+        python -m ingest.portfolio_snapshots
+
     - name: Commit and push changes
       run: |
         git config --global user.name 'github-actions[bot]'
