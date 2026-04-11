@@ -11,6 +11,7 @@ This module provides:
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any, Iterable, List, Tuple
 
 import pandas as pd
@@ -29,7 +30,6 @@ def _normalise_display_name(role: str) -> str:
 
     If the string doesn't match the expected pattern it is returned unchanged.
     """
-    import re
     # Strip trailing " (Senator)", " (Representative)", etc.
     cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", role).strip()
     if "," not in cleaned:

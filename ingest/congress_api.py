@@ -25,6 +25,21 @@ from ingest.common import clean_and_upsert
 API_HOST = "politician-trade-tracker1.p.rapidapi.com"
 
 
+def _normalise_name(name: str | None) -> str | None:
+    """Normalise a politician name to 'First Last' format.
+
+    Handles the PTR-style 'Last, First (Senator)' format that the RapidAPI
+    occasionally returns, as well as the eFD scraper output.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return name
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
+    if "," not in cleaned:
+        return cleaned
+    last, first = cleaned.split(",", 1)
+    return f"{first.strip()} {last.strip()}"
+
+
 def _api_headers() -> dict:
     api_key = os.getenv("RAPID_API_KEY")
     if not api_key:
@@ -130,7 +145,7 @@ def _transform_for_db(df: pd.DataFrame) -> pd.DataFrame:
     out["senator_last_name"] = df["politician_name"].apply(
         lambda x: " ".join(x.split()[1:]) if isinstance(x, str) and len(x.split()) > 1 else None
     )
-    out["senator_display_name"] = df["politician_name"]
+    out["senator_display_name"] = df["politician_name"].apply(_normalise_name)
     out["chamber"] = df["chamber"]
     out["asset_name"] = df["company"]
 
