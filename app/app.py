@@ -13,6 +13,7 @@ load_dotenv()
 
 from data_access import (
     load_trades_df, load_volume_by_year_df, load_all_trades_df, load_portfolio_curve,
+    load_all_portfolio_curves,
     load_lobbying_df, load_lobbying_top_spenders,
     load_gov_contracts_df, load_gov_contracts_top_recipients,
     load_activist_filings_df, load_market_intelligence_overlap, load_ticker_timeline,
@@ -93,6 +94,94 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- P&L HELPER ---
+
+def _compute_pnl(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute Estimated Profit, Estimated ROI (%), and P&L Type for each BUY row.
+
+    Rules:
+      - BUY + matching Sale (Full)  → Realized P&L using sell's price_at_transaction
+      - BUY + matching Sale (Partial) → Realized (Partial) P&L, flagged separately
+      - BUY with no matching SELL   → Unrealized P&L using current_price
+      - SELL rows / no price data   → NaN (skipped)
+
+    A SELL with no prior BUY is skipped entirely — it is ambiguous (could be
+    shares received as RSUs/inheritance, or a position opened before data starts).
+
+    Matching is done across the *full* passed DataFrame (all senators, all dates)
+    so that filter windows in get_trades_data() don't break BUY→SELL pairing.
+    """
+    if "Price At Transaction" not in df.columns or "Current Price" not in df.columns:
+        return df
+
+    df["Price At Transaction"] = pd.to_numeric(df["Price At Transaction"], errors="coerce")
+    df["Current Price"] = pd.to_numeric(df["Current Price"], errors="coerce")
+    df["Mid Point"] = pd.to_numeric(df["Mid Point"], errors="coerce").fillna(0)
+    df = df.sort_values("Transaction Date").reset_index(drop=True)
+
+    # Normalise raw type for matching: preserve original in lower-case for lookup
+    raw_col = "transaction_type_raw" if "transaction_type_raw" in df.columns else None
+
+    rois = []
+    pnl_types = []
+
+    for idx, row in df.iterrows():
+        if row["Type"] != "BUY" or pd.isna(row["Price At Transaction"]) or row["Price At Transaction"] == 0:
+            rois.append(np.nan)
+            pnl_types.append(None)
+            continue
+
+        senator = row["Senator"]
+        ticker = row["Ticker"]
+
+        # All future rows for the same senator + ticker
+        future = df.iloc[idx + 1:]
+        same = future[(future["Senator"] == senator) & (future["Ticker"] == ticker) & (future["Type"] == "SELL")]
+
+        if same.empty:
+            # No SELL found — unrealized
+            calc_price = row["Current Price"]
+            pnl_type = "Unrealized"
+        else:
+            # Prefer Sale (Full) first, then Sale (Partial)
+            if raw_col:
+                full_sells = same[same[raw_col].str.contains("Full", case=False, na=False)]
+                partial_sells = same[same[raw_col].str.contains("Partial", case=False, na=False)]
+            else:
+                full_sells = same
+                partial_sells = pd.DataFrame()
+
+            if not full_sells.empty:
+                sell_price = full_sells.iloc[0]["Price At Transaction"]
+                pnl_type = "Realized"
+            elif not partial_sells.empty:
+                sell_price = partial_sells.iloc[0]["Price At Transaction"]
+                pnl_type = "Realized (Partial)"
+            else:
+                # SELL rows present but raw type is ambiguous (e.g. lowercase 'sell' from House)
+                sell_price = same.iloc[0]["Price At Transaction"]
+                pnl_type = "Realized"
+
+            if pd.isna(sell_price) or sell_price == 0:
+                # Sell price missing — fall back to unrealized
+                calc_price = row["Current Price"]
+                pnl_type = "Unrealized"
+            else:
+                calc_price = sell_price
+
+        if pd.isna(calc_price) or calc_price == 0:
+            rois.append(np.nan)
+            pnl_types.append(None)
+        else:
+            rois.append((calc_price - row["Price At Transaction"]) / row["Price At Transaction"])
+            pnl_types.append(pnl_type)
+
+    df["Estimated ROI (%)"] = pd.Series(rois) * 100
+    df["Estimated Profit"] = (df["Estimated ROI (%)"] / 100) * df["Mid Point"]
+    df["P&L Type"] = pnl_types
+    return df
+
+
 # --- DATA LOADER (REAL PTR TRADES FROM DB) ---
 
 @st.cache_data(
@@ -162,53 +251,7 @@ def get_trades_data(days: int = 365) -> pd.DataFrame:
     if "Ticker" in df.columns:
         df = df[~df["Ticker"].isin(["--", "", None])]
 
-    # Calculate ROI/Profit for each trade with "First-Sell Closing" Heuristic
-    if "Price At Transaction" in df.columns and "Current Price" in df.columns:
-        # Force numeric types to handle any SQLite quirks
-        df["Price At Transaction"] = pd.to_numeric(df["Price At Transaction"], errors='coerce')
-        df["Current Price"] = pd.to_numeric(df["Current Price"], errors='coerce')
-        
-        # Sort values by transaction date to prepare for chronological matching
-        df = df.sort_values("Transaction Date").reset_index(drop=True)
-        
-        # We will create an array to store the calculated ROI for each row
-        rois = []
-        
-        for idx, row in df.iterrows():
-            if row["Type"] != "BUY" or pd.isna(row["Price At Transaction"]) or row["Price At Transaction"] == 0:
-                rois.append(np.nan)
-                continue
-                
-            # For a BUY, look forward in time for the first SELL by the same Senator for the same Ticker
-            future_sells = df.iloc[idx+1:]
-            matching_sells = future_sells[
-                (future_sells["Senator"] == row["Senator"]) & 
-                (future_sells["Ticker"] == row["Ticker"]) & 
-                (future_sells["Type"] == "SELL")
-            ]
-            
-            if not matching_sells.empty:
-                # Senator closed the position later! Use the sell price to calculate ROI
-                sell_price = matching_sells.iloc[0]["Price At Transaction"]
-                if pd.isna(sell_price) or sell_price == 0:
-                    # Fallback to current price if sell price data is missing
-                    calc_price = row["Current Price"]
-                else:
-                    calc_price = sell_price
-            else:
-                # Position is still open! Use Current Price
-                calc_price = row["Current Price"]
-                
-            if pd.isna(calc_price):
-                rois.append(np.nan)
-            else:
-                rois.append((calc_price - row["Price At Transaction"]) / row["Price At Transaction"])
-                
-        df["Estimated ROI (%)"] = pd.Series(rois) * 100
-        # Force Mid Point to numeric as well just in case
-        df["Mid Point"] = pd.to_numeric(df["Mid Point"], errors='coerce').fillna(0)
-        df["Estimated Profit"] = (df["Estimated ROI (%)"] / 100) * df["Mid Point"]
-
+    df = _compute_pnl(df)
     return df
 
 
@@ -257,33 +300,7 @@ def get_all_trades_data() -> pd.DataFrame:
     if "current_price" in df.columns and "Current Price" not in df.columns:
         df["Current Price"] = pd.to_numeric(df["current_price"], errors="coerce")
 
-    # ROI / Estimated Profit — same first-sell-closing heuristic as get_trades_data()
-    if "Price At Transaction" in df.columns and "Current Price" in df.columns:
-        df = df.sort_values("Transaction Date").reset_index(drop=True)
-        rois = []
-        for idx, row in df.iterrows():
-            if row["Type"] != "BUY" or pd.isna(row["Price At Transaction"]) or row["Price At Transaction"] == 0:
-                rois.append(np.nan)
-                continue
-            future_sells = df.iloc[idx + 1:]
-            matching_sells = future_sells[
-                (future_sells["Senator"] == row["Senator"]) &
-                (future_sells["Ticker"] == row["Ticker"]) &
-                (future_sells["Type"] == "SELL")
-            ]
-            if not matching_sells.empty:
-                sell_price = matching_sells.iloc[0]["Price At Transaction"]
-                calc_price = sell_price if not pd.isna(sell_price) and sell_price != 0 else row["Current Price"]
-            else:
-                calc_price = row["Current Price"]
-            if pd.isna(calc_price):
-                rois.append(np.nan)
-            else:
-                rois.append((calc_price - row["Price At Transaction"]) / row["Price At Transaction"])
-        df["Estimated ROI (%)"] = pd.Series(rois) * 100
-        df["Mid Point"] = pd.to_numeric(df["Mid Point"], errors="coerce").fillna(0)
-        df["Estimated Profit"] = (df["Estimated ROI (%)"] / 100) * df["Mid Point"]
-
+    df = _compute_pnl(df)
     return df
 
 
@@ -574,6 +591,60 @@ if page == "Executive Dashboard":
             hide_index=True
         )
 
+    # Sharpe Ratio leaderboard
+    st.markdown("## Sharpe Ratio Leaderboard")
+    st.caption(
+        "Annualised Sharpe ratio per senator, computed from monthly portfolio returns. "
+        "Formula: (mean monthly return / std monthly return) × √12. Risk-free rate = 0. "
+        "Requires ≥ 3 months of portfolio snapshot data."
+    )
+    all_curves = load_all_portfolio_curves()
+    if all_curves.empty:
+        st.info("No portfolio snapshot data yet — run `python -m ingest.portfolio_snapshots` first.")
+    else:
+        sharpe_rows = []
+        for senator, grp in all_curves.groupby("senator_display_name"):
+            monthly = (
+                grp.set_index("date")["portfolio_value"]
+                .resample("ME").last()
+                .dropna()
+            )
+            if len(monthly) < 3:
+                continue
+            returns = monthly.pct_change().dropna()
+            # Drop any inf/-inf values that arise from pct_change on zero-value months
+            returns = returns[np.isfinite(returns)]
+            std = returns.std()
+            if returns.empty or not np.isfinite(std) or std < 1e-10:
+                continue
+            sharpe = (returns.mean() / std) * np.sqrt(12)
+            if not np.isfinite(sharpe):
+                continue
+            sharpe_rows.append({
+                "Senator": senator,
+                "Sharpe Ratio": round(float(sharpe), 3),
+                "Months of Data": len(monthly),
+                "Avg Monthly Return (%)": round(float(returns.mean()) * 100, 2),
+                "Monthly Volatility (%)": round(float(std) * 100, 2),
+            })
+
+        if not sharpe_rows:
+            st.info("Not enough monthly data points to compute Sharpe ratios yet (need ≥ 3 months per senator).")
+        else:
+            sharpe_df = pd.DataFrame(sharpe_rows).sort_values("Sharpe Ratio", ascending=False).reset_index(drop=True)
+            st.dataframe(
+                sharpe_df,
+                column_config={
+                    "Senator": "Legislator",
+                    "Sharpe Ratio": st.column_config.NumberColumn("Sharpe Ratio", format="%.3f"),
+                    "Months of Data": st.column_config.NumberColumn("Months of Data"),
+                    "Avg Monthly Return (%)": st.column_config.NumberColumn("Avg Monthly Return", format="%.2f%%"),
+                    "Monthly Volatility (%)": st.column_config.NumberColumn("Monthly Volatility", format="%.2f%%"),
+                },
+                width="stretch",
+                hide_index=True,
+            )
+
 # --- PAGE 2: LIVE INTELLIGENCE FEED ---
 elif page == "Live Intelligence Feed":
     st.title("📡 Live Intelligence Feed")
@@ -606,7 +677,7 @@ elif page == "Live Intelligence Feed":
     # Select columns to display
     display_cols = ["Filing Date", "Transaction Date", "Senator", "Ticker", "Type", "Amount Range", "Mid Point", "Unusual"]
     if "Estimated Profit" in df.columns and "Estimated ROI (%)" in df.columns:
-        display_cols.extend(["Price At Transaction", "Current Price", "Estimated Profit", "Estimated ROI (%)"])
+        display_cols.extend(["Price At Transaction", "Current Price", "Estimated Profit", "Estimated ROI (%)", "P&L Type"])
 
     # Make sure all columns exist
     display_cols = [c for c in display_cols if c in filtered_df.columns]
@@ -770,8 +841,14 @@ elif page == "Senator Deep-Dives":
                 unsafe_allow_html=True,
             )
 
+        holdings_cols = [c for c in [
+            "Ticker", "Sector", "Direction", "Shares (Est)",
+            "Avg Entry Price", "Current Price",
+            "Unrealized P&L", "ROI (%)",
+            "Opened Date", "Last Trade Date",
+        ] if c in open_positions.columns]
         st.dataframe(
-            open_positions,
+            open_positions[holdings_cols],
             column_config={
                 "Ticker": st.column_config.TextColumn("Ticker"),
                 "Sector": st.column_config.TextColumn("Sector"),
@@ -779,12 +856,10 @@ elif page == "Senator Deep-Dives":
                 "Shares (Est)": st.column_config.NumberColumn("Shares (Est)", format="%.1f"),
                 "Avg Entry Price": st.column_config.NumberColumn("Avg Entry Price", format="$%.2f"),
                 "Current Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
-                "Cost Basis": st.column_config.NumberColumn("Cost Basis", format="$%d"),
-                "Current Value": st.column_config.NumberColumn("Current Value", format="$%d"),
                 "Unrealized P&L": st.column_config.NumberColumn("Unrealized P&L", format="$%d"),
                 "ROI (%)": st.column_config.NumberColumn("ROI", format="%.2f%%"),
-                "Opened Date": st.column_config.DateColumn("Opened Date"),
-                "Last Trade Date": st.column_config.DateColumn("Last Trade Date"),
+                "Opened Date": st.column_config.DateColumn("Opened"),
+                "Last Trade Date": st.column_config.DateColumn("Last Trade"),
             },
             hide_index=True,
             width="stretch",
@@ -891,7 +966,7 @@ elif page == "Senator Deep-Dives":
     ]
     
     if "Estimated Profit" in senator_all_df.columns and "Estimated ROI (%)" in senator_all_df.columns:
-        history_cols.extend(["Price At Transaction", "Current Price", "Estimated Profit", "Estimated ROI (%)"])
+        history_cols.extend(["Price At Transaction", "Current Price", "Estimated Profit", "Estimated ROI (%)", "P&L Type"])
 
     # Use senator_all_df so Congress API trades (pre-2024) are also visible,
     # not just the Senate PTR filings loaded into the 365-day senator_df.
@@ -922,10 +997,10 @@ elif page == "Market Intelligence":
     )
 
     tab_lobby, tab_contracts, tab_activist, tab_xref = st.tabs([
-        "🏛️ Corporate Lobbying",
-        "🏗️ Government Contracts",
-        "📋 Activist 13D Filings",
-        "🔗 Cross-Reference",
+        "Corporate Lobbying",
+        "Government Contracts",
+        "Activist 13D Filings",
+        "Cross-Reference",
     ])
 
     # ── TAB 1: CORPORATE LOBBYING ──────────────────────────────────────────
@@ -1118,8 +1193,8 @@ elif page == "Market Intelligence":
     with tab_xref:
         st.subheader("Cross-Reference: Congress Trades ↔ Market Intelligence")
         st.caption(
-            "Tickers where a senator traded AND the company appears in lobbying disclosures, "
-            "government contracts, or activist filings."
+            "Tickers where a senator traded AND the company appears in lobbying disclosures "
+            "or government contracts."
         )
 
         overlap_df = load_market_intelligence_overlap()
@@ -1129,31 +1204,37 @@ elif page == "Market Intelligence":
         else:
             overlap_df["transaction_date"] = pd.to_datetime(overlap_df["transaction_date"])
 
-            # Summary counts
-            o1, o2, o3 = st.columns(3)
-            o1.metric("Overlapping Tickers", overlap_df["ticker"].nunique())
-            o2.metric("In Lobbying", int(overlap_df["in_lobbying"].any()))
-            o3.metric("In Gov Contracts", int(overlap_df["in_contracts"].any()))
+            # Filter to only lobbying + contracts overlap (exclude activist)
+            overlap_df = overlap_df[
+                overlap_df["in_lobbying"].astype(bool) |
+                overlap_df["in_contracts"].astype(bool)
+            ]
 
-            st.markdown("#### Overlap Table")
-            st.dataframe(
-                overlap_df[["ticker", "senator_display_name", "transaction_date",
-                            "transaction_type", "mid_point",
-                            "in_lobbying", "in_contracts", "in_activist"]].rename(columns={
-                    "ticker": "Ticker", "senator_display_name": "Senator",
-                    "transaction_date": "Trade Date", "transaction_type": "Type",
-                    "mid_point": "Est. Value ($)",
-                    "in_lobbying": "Lobbying?", "in_contracts": "Gov Contract?",
-                    "in_activist": "Activist?",
-                }),
-                use_container_width=True, hide_index=True,
-                column_config={
-                    "Est. Value ($)": st.column_config.NumberColumn(format="$%d"),
-                    "Lobbying?": st.column_config.CheckboxColumn(),
-                    "Gov Contract?": st.column_config.CheckboxColumn(),
-                    "Activist?": st.column_config.CheckboxColumn(),
-                },
-            )
+            if overlap_df.empty:
+                st.info("No overlapping tickers found in lobbying or government contracts.")
+            else:
+                o1, o2, o3 = st.columns(3)
+                o1.metric("Overlapping Tickers", overlap_df["ticker"].nunique())
+                o2.metric("In Lobbying",      overlap_df[overlap_df["in_lobbying"].astype(bool)]["ticker"].nunique())
+                o3.metric("In Gov Contracts", overlap_df[overlap_df["in_contracts"].astype(bool)]["ticker"].nunique())
+
+                st.markdown("#### Overlap Table")
+                st.dataframe(
+                    overlap_df[["ticker", "senator_display_name", "transaction_date",
+                                "transaction_type", "mid_point",
+                                "in_lobbying", "in_contracts"]].rename(columns={
+                        "ticker": "Ticker", "senator_display_name": "Senator",
+                        "transaction_date": "Trade Date", "transaction_type": "Type",
+                        "mid_point": "Est. Value ($)",
+                        "in_lobbying": "Lobbying?", "in_contracts": "Gov Contract?",
+                    }),
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "Est. Value ($)": st.column_config.NumberColumn(format="$%d"),
+                        "Lobbying?": st.column_config.CheckboxColumn(),
+                        "Gov Contract?": st.column_config.CheckboxColumn(),
+                    },
+                )
 
             st.markdown("---")
             st.markdown("#### Timeline: Senator Trades vs Events")

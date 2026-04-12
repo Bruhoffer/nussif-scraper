@@ -159,6 +159,30 @@ def load_portfolio_curve(senator_display_name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def load_all_portfolio_curves() -> pd.DataFrame:
+    """Load portfolio snapshots for all senators in one query.
+
+    Returns a DataFrame with columns: senator_display_name, date, portfolio_value.
+    Used for computing cross-senator metrics like Sharpe ratio leaderboard.
+    """
+    query = text(
+        """
+        SELECT senator_display_name, snapshot_date AS date, portfolio_value
+        FROM portfolio_snapshots
+        ORDER BY senator_display_name, snapshot_date ASC
+        """
+    )
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn)
+            if not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+            return df
+    except (OperationalError, SQLAlchemyError) as exc:
+        print(f"[load_all_portfolio_curves] DB query failed: {exc}")
+        return pd.DataFrame()
+
+
 # ---------------------------------------------------------------------------
 # Market Intelligence loaders
 # ---------------------------------------------------------------------------

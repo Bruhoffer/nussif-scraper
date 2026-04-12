@@ -823,13 +823,10 @@ def compute_portfolio_curve(
                             }
                     else:  # SELL
                         if pos["shares"] <= 0:
-                            total_shares = pos["shares"] - shares_transacted
-                            total_cost = pos["cost_basis"] + mid
-                            positions[ticker] = {
-                                "shares": total_shares,
-                                "avg_entry_price": total_cost / abs(total_shares),
-                                "cost_basis": total_cost,
-                            }
+                            # No confirmed prior long — could be RSUs, pre-data position,
+                            # or ambiguous. Skip rather than opening a phantom short that
+                            # would drive the portfolio value negative.
+                            pass
                         else:  # closing long
                             remaining = pos["shares"] - shares_transacted
                             positions[ticker] = {
@@ -906,8 +903,14 @@ def compute_portfolio_metrics(
 
     # --- Max drawdown ---
     peak = np.maximum.accumulate(values)
-    drawdowns = np.where(peak > 0, (values - peak) / peak, 0.0)
-    result["max_drawdown_pct"] = float(drawdowns.min() * 100)
+    # Only compute where peak > 0; if peak never goes positive (e.g. all-short
+    # portfolio or insufficient data), drawdown is undefined — leave as None.
+    valid = peak > 0
+    if valid.any():
+        drawdowns = np.where(valid, (values - peak) / peak, 0.0)
+        result["max_drawdown_pct"] = float(drawdowns.min() * 100)
+    else:
+        result["max_drawdown_pct"] = None
 
     # --- Monthly returns for Sharpe and Beta ---
     monthly = (
