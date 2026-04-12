@@ -28,6 +28,7 @@ jobs:
     - name: Run weekly scraper (Senate PTR + Congress API)
       env:
         RAPID_API_KEY: ${{ secrets.RAPID_API_KEY }}
+        SEC_API_KEY: ${{ secrets.SEC_API_KEY }}
       run: |
         # Runs Senate PTR (last 7 days) + full RapidAPI Congress pull.
         # Idempotent upsert means re-running is always safe.
