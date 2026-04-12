@@ -588,16 +588,13 @@ def track_positions(senator_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFram
 
         else:  # SELL
             if pos is None or pos["shares"] == 0:
-                # Open new short
-                positions[ticker] = {
-                    "shares": -shares_transacted,
-                    "avg_entry_price": price,
-                    "cost_basis": mid,
-                    "opened_date": tx_date,
-                    "sector": sector,
-                }
+                # No confirmed prior long — skip to avoid phantom shorts.
+                # Ambiguous SELLs (RSUs, pre-data positions) cannot be
+                # distinguished from genuine short sales without additional data.
+                pass
             elif pos["shares"] < 0:
-                # Scale into existing short
+                # Already confirmed short (opened by overshooting zero from a long).
+                # Scale into it.
                 total_shares = pos["shares"] - shares_transacted  # more negative
                 total_cost = pos["cost_basis"] + mid
                 positions[ticker] = {
